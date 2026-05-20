@@ -1,0 +1,9 @@
+target/
+.git/
+logs/
+.qbtc_data/
+testnet_logs/
+**/*.dat
+**/*.log
+**/*.rdb
+**/*.sst

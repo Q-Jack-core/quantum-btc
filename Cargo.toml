@@ -1,0 +1,86 @@
+[package]
+name = "quantum-btc"
+version = "0.1.0"
+edition = "2021"
+authors = ["QBTC Genesis Architect <null@void.com>"]
+description = "QBTC: The Post-Quantum Fair-Launch Protocol"
+# Defines the default binary to prevent cargo run ambiguity.
+default-run = "quantum-btc"
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+panic = "unwind"
+debug = true
+
+[dependencies]
+bs58 = "0.5.0"
+tokio = { version = "1.35.0", features = ["full", "tracing"] }
+tiny-keccak = { version = "2.0.2", features = ["kmac"] }
+ml-dsa = { version = "0.1.0-rc.8" }
+serde = { version = "1.0.193", features = ["derive"] }
+bincode = "1.3.3"
+# Networking and historical IBD sync via request-response, cbor, kademlia, and dns.
+libp2p = { version = "0.53.1", features = ["tcp", "noise", "yamux", "tokio", "gossipsub", "mdns", "macros", "identify", "request-response", "cbor", "kad", "dns", "ping"] }
+rocksdb = "0.21.0"
+
+# =====================================================================
+# Aligned sha2 version with pbkdf2's digest requirements.
+# =====================================================================
+sha2 = "0.10.8"
+
+# =====================================================================
+# RPC Server Dependencies
+# =====================================================================
+axum = "0.7"
+serde_json = "1.0"
+tower-http = { version = "0.6.8", features = ["cors"] }
+
+# =====================================================================
+# Wallet and Mnemonic Dependencies
+# =====================================================================
+bip39 = "2.0.0"
+rand = { version = "=0.10.1", features = ["sys_rng"] }
+
+# =====================================================================
+# Cryptographic and Encoding Suite
+# =====================================================================
+aes-gcm = "0.10.3"
+pbkdf2 = "0.12.2"
+hmac = "0.12.1"
+base64 = "0.22.1"
+zeroize = "1.8.2"
+pkcs8 = { version = "=0.11.0-rc.11", features = ["alloc"] }
+spki = { version = "=0.8.0", features = ["alloc"] }
+rand_core = "=0.10.1"
+bech32 = "0.9.1"
+inquire = "0.7.5"
+
+# =====================================================================
+# Concurrency and Parallel Processing (Tier 0 Architecture)
+# =====================================================================
+rayon = "1.10.0"
+crossbeam-channel = "0.5.12"
+
+# =====================================================================
+# Observability and Asynchronous Logging
+# Ensures non-blocking I/O for the P2P engine and structured file tracking.
+# =====================================================================
+tracing = "0.1.40"
+tracing-subscriber = { version = "0.3.18", features = ["env-filter", "fmt"] }
+tracing-appender = "0.2.3"
+indexmap = "2.14.0"
+lazy_static = "1.5.0"
+
+[build-dependencies]
+cc = "1.0.83"
+
+# =============================================================================
+# Development and Testing Dependencies
+# Compiled exclusively during 'cargo test'. Stripped from production builds.
+# =============================================================================
+[dev-dependencies]
+proptest = "1.4.0"
+tempfile = "3.10"
+loom = "0.7"

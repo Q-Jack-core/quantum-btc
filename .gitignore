@@ -1,0 +1,46 @@
+# =====================================================================
+# Q-BTC MAINNET: IGNORANCE POLICY
+# =====================================================================
+
+# 1. Rust Build Artifacts & Caches
+/target/
+**/*.rs.bk
+Cargo.lock.bk
+
+# 2. Local Ledger Databases & Physical State (DO NOT COMMIT)
+.qbtc_data/
+.qbtc_crash_test_db/
+qbtc_vault_*/
+*.sst
+*.log
+MANIFEST-*
+LOG*
+
+# 3. Cryptographic Keys & Keystores (TOP SECRET)
+quantum_keystore.dat
+keystores/
+*.dat
+*.pem
+*.key
+.env
+
+# 4. OS Generated Files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# 5. IDE & Editor Configs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# 6. Local Archives & Runtime Logs
+logs/
+testnet_logs/
+*.zip
+*.tar.gz
