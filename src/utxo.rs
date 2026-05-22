@@ -120,7 +120,7 @@ impl UtxoState {
     // -------------------------------------------------------------------------
 
     /// Account for pending transactions in the mempool to provide accurate balance projection.
-    pub fn get_balance(&self, pubkey_hash: &[u8; 32], current_height: u64, pending_txs: &[Transaction]) -> (u64, u64) {
+    pub fn get_balance(&self, pubkey_hash: &[u8; 32], current_height: u64, pending_txs: &[Transaction]) -> (u64, u64, u64) {
         let mut mature = 0;
         let mut locked = 0;
         let mut pending_change = 0;
@@ -135,7 +135,7 @@ impl UtxoState {
                     vout: input.vout 
                 });
             }
-            // 2. Add pending change coming back to us in unmined transactions.
+            // 2. Isolate pending mempool funds for security verification.
             for output in &tx.outputs {
                 if output.public_key_hash == *pubkey_hash {
                     pending_change += output.value;
@@ -152,8 +152,8 @@ impl UtxoState {
                 }
             }
         }
-        // Returns mature balance (including pending change) and locked coinbase balance.
-        (mature + pending_change, locked)
+        // Decouple state: (Confirmed On-Chain, Pending Mempool, Locked Coinbase)
+        (mature, pending_change, locked)
     }
 
     // -------------------------------------------------------------------------
@@ -488,7 +488,7 @@ pub enum UtxoCommand {
         pubkey_hash: [u8; 32],
         current_height: u64,
         pending_txs: Vec<Transaction>,
-        resp: oneshot::Sender<(u64, u64)>,
+        resp: oneshot::Sender<(u64, u64, u64)>,
     },
     /// Extracts a deep clone of the current state snapshot for disk persistence.
     GetSnapshot {

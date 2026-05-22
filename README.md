@@ -22,6 +22,8 @@ In accordance with the core principles of cryptographic transparency and de-trus
 
 The baseline initialization phase has successfully concluded. The network has achieved complete operational equilibrium, and the protocol is officially open to global, fully decentralized consensus participation.
 
+*(Note: The initial UTXOs generated during this 200-block bootstrapping phase currently hold zero financial value. They are retained quietly as a basic sinking fund for daily network maintenance, and will not be circulated recklessly.)*
+
 ---
 
 ## 🛠 Core Technical Breakthroughs

@@ -1273,14 +1273,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
                         
                         let _ = cli_utxo_tx.blocking_send(utxo::UtxoCommand::GetBalance { pubkey_hash: my_pk_hash, current_height, pending_txs: pending_txs.clone(), resp: resp_tx });
-                        let (mature, locked) = resp_rx.blocking_recv().unwrap_or((0, 0));
+                        // Receive decoupled parameters ensuring strict mempool isolation.
+                        let (mature, pending, locked) = resp_rx.blocking_recv().unwrap_or((0, 0, 0));
                         
                         println!("[INFO] Vault: Balance for Alias '{}' ({}):", wallet_name, address);
                         let hex_string: String = my_pk_hash.iter().map(|b| format!("{:02x}", b)).collect();
                         println!("[INFO] Vault: Target Hash Hex: {}", hex_string);
 
-                        println!("  Spendable (Mature): {:.8} QBTC", mature as f64 / 100_000_000.0);
-                        println!("  Locked (Coinbase): {:.8} QBTC", locked as f64 / 100_000_000.0);
+                        // Strict UI separation of cryptographic certainty.
+                        println!("  Confirmed (On-Chain) : {:.8} QBTC", mature as f64 / 100_000_000.0);
+                        if pending > 0 {
+                            println!("  Pending (Mempool)    : +{:.8} QBTC", pending as f64 / 100_000_000.0);
+                        }
+                        println!("  Locked (Coinbase)    : {:.8} QBTC", locked as f64 / 100_000_000.0);
                     } else { 
                         println!("[ERROR] Wallet: No keystore found for '{}'.", wallet_name); 
                     }

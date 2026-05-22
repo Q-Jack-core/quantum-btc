@@ -131,6 +131,9 @@ lazy_static! {
         
         // Block 100：First hardcoded stability checkpoint.
         m.insert(100, parse_hex("00000000f7848b67987d7b4dcbc5dfc541cc98ef7ec108eb3380154df294c330"));
+
+        // Block 200: Second hardcoded stability checkpoint (Mainnet Launch Anchor).
+        m.insert(200, parse_hex("00000000e78797980fc697b63da596ac20d14528c2b001ad794688f3ad3b062d"));
         
         m
     };
