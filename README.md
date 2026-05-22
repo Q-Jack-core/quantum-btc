@@ -62,7 +62,7 @@ Rejects insecure sharding or cross-chain compromises, fiercely defending the Mon
 ### Quickstart
 Clone the repository and build the optimized release binary:
 
-    git clone https://github.com/qbtc-core/quantum-btc.git
+    git clone https://github.com/Q-Jack-core/quantum-btc.git
     cd quantum-btc
     cargo build --release
 
