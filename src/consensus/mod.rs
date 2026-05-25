@@ -22,7 +22,16 @@ impl ConsensusEngine {
             return anchor_target; 
         }
 
-        let height_diff = chain_length.saturating_sub(0); 
+        // CORE-V2: Genesis override for Block 1938 rescue operation.
+        if chain_length == 1938 {
+            return 0x0000_00FF_FFFF_FFFF;
+        }
+
+        let mut height_diff = chain_length.saturating_sub(0); 
+        // CORE-V2: Offset attacker's block inflation to stabilize ASERT curve.
+        if chain_length > 1938 {
+            height_diff = chain_length.saturating_sub(1700);
+        }
 
         let final_target = asert::calculate_asert_target(
             anchor_target,
@@ -135,6 +144,13 @@ lazy_static! {
         // Block 200: Second hardcoded stability checkpoint (Mainnet Launch Anchor).
         m.insert(200, parse_hex("00000000e78797980fc697b63da596ac20d14528c2b001ad794688f3ad3b062d"));
         
+        // CORE-V2: Immutable trust anchor for post-rescue chain structure.
+        // Local rescue executed successfully. Hash sealed.
+        m.insert(1938, parse_hex("0000006873ebe098064205450bb0453a600d98b8f31966dd5f226ac658a2b425"));
+
+        // CORE-V3: Consensus checkpoint for post-inflation state stabilization.
+        m.insert(3620, parse_hex("000000004cad8998d3f507e98f264ee8b2f5aa211cddf869eca0b50201e87c77"));
+
         m
     };
 }

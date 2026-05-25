@@ -24,6 +24,14 @@ The baseline initialization phase has successfully concluded. The network has ac
 
 *(Note: The initial UTXOs generated during this 200-block bootstrapping phase currently hold zero financial value. They are retained quietly as a basic sinking fund for daily network maintenance, and will not be circulated recklessly.)*
 
+## 🛡️ Core Philosophy: A Grassroots Experiment
+
+Let’s be clear about what we’re building here. Quantum BTC is a 100% fair-launch, pure Proof-of-Work chain. **There is zero VC funding, no pre-mine, no dev tax, and no corporate backing.** It is a purely grassroots cypherpunk experiment designed to test anti-quantum cryptography in the wild. 
+
+## 🤝 An Open Invitation
+
+Permissionless means exactly that. Whether you are pointing a massive server farm at us, running a single CPU node on a dusty ThinkPad, or you are a developer trying to break our code—you are welcome here. Spin up a node, read the source, open Issues, and submit Pull Requests. Let's build this anti-quantum infrastructure together.
+
 ---
 
 ## 🛠 Core Technical Breakthroughs
