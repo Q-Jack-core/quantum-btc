@@ -1,0 +1,51 @@
+name: Q-BTC Genesis Auto-Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build-and-release:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            artifact_name: qbtc-core-linux.tar.gz
+            binary_name: quantum-btc
+          - os: macos-latest
+            artifact_name: qbtc-core-macos.tar.gz
+            binary_name: quantum-btc
+          - os: windows-latest
+            artifact_name: qbtc-core-windows.zip
+            binary_name: quantum-btc.exe
+
+    steps:
+      - name: Checkout Source Code
+        uses: actions/checkout@v4
+
+      - name: Install Stable Rust Toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Ignite Cargo Build (Release Mode)
+        run: cargo build --release
+
+      - name: Package Linux and macOS Binaries (tar.gz)
+        if: matrix.os != 'windows-latest'
+        run: |
+          cd target/release
+          tar -czvf ../../${{ matrix.artifact_name }} ${{ matrix.binary_name }}
+
+      - name: Package Windows Binary (zip)
+        if: matrix.os == 'windows-latest'
+        run: |
+          cd target/release
+          Compress-Archive -Path ${{ matrix.binary_name }} -DestinationPath ../../${{ matrix.artifact_name }}
+
+      - name: Upload Payloads to GitHub Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.artifact_name }}
