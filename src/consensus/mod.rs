@@ -151,6 +151,11 @@ lazy_static! {
         // CORE-V3: Consensus checkpoint for post-inflation state stabilization.
         m.insert(3620, parse_hex("000000004cad8998d3f507e98f264ee8b2f5aa211cddf869eca0b50201e87c77"));
 
+        // =================================================================
+        // GENESIS LOCK: THE 10000 BLOCK MILESTONE
+        // =================================================================
+        m.insert(10000, parse_hex("000000000089f7e3ca2260477c830545abd6e02fc514703e39f2c25fd30486d4"));
+
         m
     };
 }

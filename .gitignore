@@ -44,3 +44,15 @@ logs/
 testnet_logs/
 *.zip
 *.tar.gz
+# ==========================================
+# 🚨 Q-BTC EMERGENCY SECRET SECURITY LOCK
+# ==========================================
+*.key
+*.pem
+*.priv
+*secret*
+wallet.dat
+.qbtc_crash_test_db/
+.qbtc_data/
+logs/
+target/
