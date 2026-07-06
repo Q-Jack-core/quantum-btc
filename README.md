@@ -83,11 +83,10 @@ Q-BTC is a fundamental architectural redesign optimized for the post-quantum era
 
 ### Build Instructions
 ```bash
-git clone [https://github.com/Q-Jack-core/quantum-btc.git](https://github.com/Q-Jack-core/quantum-btc.git)
+git clone https://github.com/Q-Jack-core/quantum-btc.git
 cd quantum-btc
 cargo build --release
 ```
-The node binary will be available at ./target/release/quantum-btc.
 
 ---
 
