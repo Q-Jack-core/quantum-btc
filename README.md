@@ -84,12 +84,22 @@ Q-BTC is a fundamental architectural redesign optimized for the post-quantum era
 - CMake & Clang (for RocksDB compilation)
 
 ### Build Instructions
+
 ```bash
 git clone https://github.com/Q-Jack-core/quantum-btc.git
 cd quantum-btc
 cargo build --release
 ```
 
+### Run the Node
+
+After building from source, you can start the Q-BTC node directly:
+
+```bash
+cargo run --release
+```
+
+*(Alternatively, you can execute the compiled binary: `./target/release/quantum-btc`)*
 ---
 
 ## ⚠️ Disclaimer

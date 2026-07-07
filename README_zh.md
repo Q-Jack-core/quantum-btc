@@ -81,12 +81,23 @@ Q-BTC 针对后量子时代进行了底层的架构重构，包含：
 - Rust 工具链 (cargo 1.75+)
 - CMake & Clang (用于编译 RocksDB)
 
-### 构建指令
+### 编译指令
+
 ```bash
 git clone https://github.com/Q-Jack-core/quantum-btc.git
 cd quantum-btc
 cargo build --release
 ```
+
+### 运行节点
+
+从源码编译完成后，可以直接启动 Q-BTC 节点：
+
+```bash
+cargo run --release
+```
+
+*(或者，也可以直接执行编译后的二进制文件：`./target/release/quantum-btc`)*
 
 ---
 
