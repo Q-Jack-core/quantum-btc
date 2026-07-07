@@ -1,5 +1,7 @@
 # Quantum Bitcoin (Q-BTC) Core
 
+*Read this in other languages: [English](README.md), [简体中文](README_zh.md).*
+
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-blue.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Status: Mainnet Live](https://img.shields.io/badge/Status-Mainnet_Live-green.svg)]()
@@ -91,6 +93,6 @@ cargo build --release
 ---
 
 ## ⚠️ Disclaimer
-**The Q-BTC mainnet has been ignited, but the protocol remains in a highly experimental early stage.** This software is provided "as-is" without commercial promises or security guarantees. Participate entirely at your own risk.
+**The Q-BTC mainnet has successfully crossed the 10,000-block genesis stress phase and is now entering wild hash-rate expansion.** While the post-quantum baseline has been practically validated, this remains a hardcore cryptography experiment. This software is provided "as-is" without commercial promises or VC bailouts. Participate, secure the network, and bear the risks at your own discretion.
 
 📄 **[Read the Official Genesis Whitepaper V2.0](./Q-BTC%20Whitepaper%20V2.0.pdf)**
