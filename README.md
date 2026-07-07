@@ -100,6 +100,7 @@ cargo run --release
 ```
 
 *(Alternatively, you can execute the compiled binary: `./target/release/quantum-btc`)*
+
 ---
 
 ## ⚠️ Disclaimer
