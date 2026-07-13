@@ -28,6 +28,11 @@
 .\quantum-btc.exe
 ```
 
+> **⚠️ Windows 疑难解答 (错误 10013 / 找不到命令):**
+> *   **找不到命令 (Not Recognized):** 请确保您的命令行处于文件下载的具体文件夹路径中（例如，在启动前输入 `cd C:\Users\您的用户名\Desktop`）。
+> *   **错误 10013 (PermissionDenied):** Windows 正在拦截默认的 P2P 网络端口。要解决此问题，请更换端口启动节点，直接输入：`.\quantum-btc.exe --port 19999`
+> *   **防火墙拦截 (Firewall Block):** 请确保您的杀毒软件或 Windows Defender 防火墙已设置为在“专用网络”和“公用网络”中均“允许” `quantum-btc.exe` 运行。
+
 **对于 macOS/Linux:**
 ```text
 ./quantum-btc

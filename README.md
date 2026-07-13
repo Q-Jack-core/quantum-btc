@@ -30,6 +30,11 @@ Visit the [Releases page](https://github.com/Q-Jack-core/quantum-btc/releases) a
 .\quantum-btc.exe
 ```
 
+> **⚠️ Windows Troubleshooting (Error 10013 / Not Recognized):**
+> *   **Command Not Recognized:** Ensure your command prompt is in the exact folder where the file is downloaded (e.g., type `cd C:\Users\YourName\Desktop` before launching).
+> *   **Error 10013 (PermissionDenied):** Windows is blocking the default P2P network port. To fix this, run the node on a different port by typing: `.\quantum-btc.exe --port 19999`
+> *   **Firewall Block:** Ensure your antivirus or Windows Defender Firewall is set to "Allow" `quantum-btc.exe` through both Private and Public networks.
+
 **For macOS/Linux:**
 ```text
 ./quantum-btc
