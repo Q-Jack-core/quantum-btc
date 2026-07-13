@@ -31,6 +31,7 @@ pub struct RpcState {
     
     // Integrated QuantumStorage to query physical chain height.
     pub storage: Arc<QuantumStorage>,
+    pub explorer_enabled: bool,
 }
 
 #[derive(Serialize)]
@@ -110,16 +111,26 @@ pub async fn start_rpc_server(port: u16, state: RpcState) {
     let addr = SocketAddr::from(([127, 0, 0, 1], rpc_port));
     
     let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
-    let app = Router::new()
+    
+    // Convert 'app' to mutable to allow conditional route mounting
+    let mut app = Router::new()
         .route("/api/get_info", get(get_node_info))
         .route("/api/get_balance", post(get_tactical_balance)) 
         .route("/api/execute_transfer", post(execute_transfer)) 
         .route("/api/wallet_gen", post(api_wallet_gen))
         .route("/api/wallet_restore", post(api_wallet_restore))
         .route("/api/tx_status", post(get_tx_status))
-        .route("/api/verify_target", post(verify_tactical_target))
-        .layer(cors)
-        .with_state(state); 
+        .route("/api/verify_target", post(verify_tactical_target));
+
+    // CORE DEFENSE SWITCH: Mount the block explorer API only if the specific flag is enabled
+    // This isolates standard miners from potential DDoS or I/O bottleneck attacks.
+    if state.explorer_enabled {
+        app = app.route("/api/get_block", post(get_block_by_height));
+        println!("[WARN] ⚠️ EXPLORER API ENABLED: Block data is publicly accessible on port {}.", rpc_port);
+    }
+
+    // Apply CORS layer and state after all routes are conditionally mounted
+    let app = app.layer(cors).with_state(state); 
 
     println!("[INFO] RPC: Server listening on http://127.0.0.1:{}", rpc_port);
     let listener = TcpListener::bind(addr).await.unwrap();
@@ -347,4 +358,48 @@ async fn verify_tactical_target(State(state): State<RpcState>, Json(req): Json<V
     } else {
         Json(VerifyTargetResponse { is_valid: false, exact_hex: None, message: "Invalid target format.".to_string() })
     }
+}
+
+
+#[derive(Deserialize)]
+pub struct BlockRequest {
+    pub height: u64,
+}
+
+#[derive(Serialize)]
+pub struct BlockResponse {
+    pub height: u64,
+    pub timestamp: u64,
+    pub previous_hash: String,
+    pub merkle_root: String,
+    pub commit_merkle_root: String,
+    pub nonce: u64,
+    pub target: u64,
+    pub tx_count: usize,
+}
+
+async fn get_block_by_height(State(state): State<RpcState>, Json(req): Json<BlockRequest>) -> Json<Option<BlockResponse>> {
+    let chain = state.storage.get_chain_list();
+    if req.height as usize >= chain.len() {
+        return Json(None);
+    }
+    let target_hash = chain[req.height as usize];
+
+    if let Some(block) = state.storage.get_block_by_hash(&target_hash, false) {
+        let prev_hex: String = block.header.previous_hash.iter().map(|b| format!("{:02x}", b)).collect();
+        let merkle_hex: String = block.header.merkle_root.iter().map(|b| format!("{:02x}", b)).collect();
+        let commit_merkle_hex: String = block.header.commit_merkle_root.iter().map(|b| format!("{:02x}", b)).collect();
+
+        return Json(Some(BlockResponse {
+            height: req.height,
+            timestamp: block.header.timestamp,
+            previous_hash: prev_hex,
+            merkle_root: merkle_hex,
+            commit_merkle_root: commit_merkle_hex,
+            nonce: block.header.nonce,
+            target: block.header.target,
+            tx_count: block.transactions.len(),
+        }));
+    }
+    Json(None)
 }

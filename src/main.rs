@@ -392,7 +392,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (direct_resp_tx, mut direct_resp_rx) = tokio::sync::mpsc::channel::<(libp2p::request_response::ResponseChannel<crate::network::SyncResponse>, crate::network::SyncResponse)>(100);
 
     
-        let rpc_state = rpc::RpcState { 
+    // EXPLORER API: Check if the special startup flag is provided via command line
+    let enable_explorer = args.contains(&"--enable-explorer-api".to_string());
+
+    let rpc_state = rpc::RpcState { 
         port, 
         datadir: datadir.clone(), // Injects decoupled datadir into RPC subsystem.
         mempool: mempool.clone(), 
@@ -400,6 +403,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         utxo_tx: utxo_tx.clone(), // V1.2 FIX: Inject Actor Sender instead of Mutex.
         p2p_tx: p2p_tx.clone(), 
         storage: storage.clone(),
+        explorer_enabled: enable_explorer, // Pass the toggle flag to RPC module
     };
     let rpc_port_clone = port + 1; // FIX: Prevent TCP port collision between RPC and P2P
     tokio::spawn(async move { rpc::start_rpc_server(rpc_port_clone, rpc_state).await; });
