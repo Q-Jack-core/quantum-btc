@@ -207,9 +207,16 @@ async fn get_tactical_balance(State(state): State<RpcState>, Json(req): Json<Bal
         pending_txs,
         resp: resp_tx 
     }).await;
-    let (mature_sats, _pending_sats, locked_sats) = resp_rx.await.unwrap_or((0, 0, 0));
+    
+    // FIX: Removed the underscore from '_pending_sats' to actively receive the mempool pending balance.
+    let (mature_sats, pending_sats, locked_sats) = resp_rx.await.unwrap_or((0, 0, 0));
 
-    Json(BalanceResponse { address: req.address, confirmed_sats: mature_sats, unconfirmed_sats: locked_sats })
+    // FIX: Combine pending mempool funds and immature coinbase rewards to represent the total unconfirmed balance.
+    Json(BalanceResponse { 
+        address: req.address, 
+        confirmed_sats: mature_sats, 
+        unconfirmed_sats: pending_sats + locked_sats 
+    })
 }
 
 // =============================================================================

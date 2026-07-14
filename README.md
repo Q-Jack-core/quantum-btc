@@ -59,6 +59,11 @@ You will see the node begin processing hash iterations immediately. Your compute
 
 ---
 
+## 🌐 Official Blockchain Explorer
+
+You can monitor the Q-BTC network's heartbeat, live hashrate, and transaction flow in real-time here:
+👉 https://explorer.qbtc-core.org
+
 ## 🛡️ Core Philosophy: A Grassroots Experiment
 Quantum BTC is a 100% fair-launch, pure Proof-of-Work chain. There is **zero VC funding, no pre-mine, no dev tax, and no corporate backing**. It is a purely grassroots cypherpunk experiment designed to test anti-quantum cryptography in the wild.
 
