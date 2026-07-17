@@ -27,7 +27,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: cargo build --release
 
-      - if: matrix.os != 'windows-latest'
+      - if: matrix.os == 'ubuntu-latest'
+        run: |
+          strip target/release/${{ matrix.binary_name }}
+          cd target/release
+          tar -czvf ../../${{ matrix.artifact_name }} ${{ matrix.binary_name }}
+
+      - if: matrix.os == 'macos-latest'
         run: |
           cd target/release
           tar -czvf ../../${{ matrix.artifact_name }} ${{ matrix.binary_name }}
