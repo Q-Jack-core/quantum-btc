@@ -297,11 +297,32 @@ impl UtxoState {
     }
 
     /// Validates recovery hash reveal against the on-chain recovery data.
-    fn verify_recovery_reveal(&self, tx: &Transaction, input_idx: usize, _target_hash: &[u8; 32]) -> bool {
-        // Implementation Note: In a production 'Reveal', the witness contains 
-        // the raw public key and the salt used. We hash them and compare to the target.
-        // For the current version, existence of a valid witness for the heir is checked.
-        tx.witnesses.get(input_idx).is_some()
+    fn verify_recovery_reveal(&self, tx: &Transaction, input_idx: usize, target_hash: &[u8; 32]) -> bool {
+        // 1. Verify witness existence
+        let witness = match tx.witnesses.get(input_idx) {
+            Some(w) => w,
+            None => {
+                println!("[WARN] Security: Missing witness for recovery attempt.");
+                return false;
+            }
+        };
+
+        // 2. Block theft vector (Prevent public key substitution attack)
+        // Hash the provided public key via SHA-256 and enforce absolute equality with the on-chain target_hash commitment.
+        use sha2::{Digest, Sha256};
+        let mut hasher = Sha256::new();
+        hasher.update(&witness.public_key);
+        let computed_hash: [u8; 32] = hasher.finalize().into();
+
+        if computed_hash != *target_hash {
+            println!("[WARN] Security: Recovery hash mismatch! Blocked potential theft attempt.");
+            return false;
+        }
+
+        // 3. Cryptographic proof of ownership (ML-DSA-65 signature verification)
+        // Even if the attacker spoofs the public key hash, they must prove ownership via the backup post-quantum private key.
+        let tx_core_hash = tx.calculate_id();
+        crate::crypto::ml_dsa::verify_signature(&tx_core_hash, &witness.signature, &witness.public_key)
     }
 
     // -------------------------------------------------------------------------
