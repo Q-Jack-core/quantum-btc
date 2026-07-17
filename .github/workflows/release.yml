@@ -40,11 +40,11 @@ jobs:
           tar -czvf ../../${{ matrix.artifact_name }} ${{ matrix.binary_name }}
 
       - name: Package Windows Binary (zip)
-      if: matrix.os == 'windows-latest'
-      run: |
-        cp Start_Mining.bat target/release/
-        cd target/release
-        Compress-Archive -Path ${{ matrix.binary_name }}, Start_Mining.bat -DestinationPath ../${{ matrix.artifact_name }}
+        if: matrix.os == 'windows-latest'
+        run: |
+          cp Start_Mining.bat target/release/
+          cd target/release
+          Compress-Archive -Path ${{ matrix.binary_name }}, Start_Mining.bat -DestinationPath ../${{ matrix.artifact_name }}
 
       - name: Upload Payloads to GitHub Releases
         uses: softprops/action-gh-release@v2
