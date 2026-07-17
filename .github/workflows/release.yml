@@ -6,8 +6,7 @@ on:
       - 'v*'
 
 jobs:
-  build-and-release:
-    name: Build on ${{ matrix.os }}
+  build:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
@@ -24,29 +23,36 @@ jobs:
             binary_name: quantum-btc.exe
 
     steps:
-      - name: Checkout Source Code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo build --release
 
-      - name: Install Stable Rust Toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Ignite Cargo Build (Release Mode)
-        run: cargo build --release
-
-      - name: Package Linux and macOS Binaries (tar.gz)
-        if: matrix.os != 'windows-latest'
+      - if: matrix.os != 'windows-latest'
         run: |
           cd target/release
           tar -czvf ../../${{ matrix.artifact_name }} ${{ matrix.binary_name }}
 
-      - name: Package Windows Binary (zip)
-        if: matrix.os == 'windows-latest'
+      - if: matrix.os == 'windows-latest'
         run: |
           cp Start_Mining.bat target/release/
           cd target/release
-          Compress-Archive -Path ${{ matrix.binary_name }}, Start_Mining.bat -DestinationPath ../${{ matrix.artifact_name }}
+          Compress-Archive -Path ${{ matrix.binary_name }}, Start_Mining.bat -DestinationPath ../../${{ matrix.artifact_name }}
 
-      - name: Upload Payloads to GitHub Releases
-        uses: softprops/action-gh-release@v2
+      - uses: actions/upload-artifact@v4
         with:
-          files: ${{ matrix.artifact_name }}
+          name: ${{ matrix.artifact_name }}
+          path: ${{ matrix.artifact_name }}
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*
+          generate_release_notes: true
