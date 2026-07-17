@@ -23,18 +23,18 @@
 
 ### 2. 启动引擎
 
-**对于 Windows:**
-```text
-.\quantum-btc.exe
-```
+**对于 Windows (最简单的一键启动):**
+我们已为您消除了所有命令行门槛，只需双击即可起飞：
 
-> **⚠️ Windows 疑难解答 (错误 10013 / 找不到命令):**
-> *   **找不到命令 (Not Recognized):** 请确保您的命令行处于文件下载的具体文件夹路径中（例如，在启动前输入 `cd C:\Users\您的用户名\Desktop`）。
-> *   **错误 10013 (PermissionDenied):** Windows 正在拦截默认的 P2P 网络端口。要解决此问题，请更换端口启动节点，直接输入：`.\quantum-btc.exe --port 19999`
-> *   **防火墙拦截 (Firewall Block):** 请确保您的杀毒软件或 Windows Defender 防火墙已设置为在“专用网络”和“公用网络”中均“允许” `quantum-btc.exe` 运行。
+1. 解压下载的 `qbtc-core-windows.zip` 文件。
+2. 双击运行 `Start_Mining.bat` 文件。
+3. 引擎将启动保姆级的新手引导面板。只需跟着屏幕上的绿色提示，即可轻松完成创建钱包、备份助记词和一键开启 CPU 挖矿！（脚本已为你自动绕过烦人的 Windows 10013 端口拦截问题）。
 
 **对于 macOS/Linux:**
-```text
+打开你的终端 (Terminal)，进入解压后的文件夹。在运行前，请务必先赋予程序可执行权限：
+
+```bash
+chmod +x quantum-btc
 ./quantum-btc
 ```
 

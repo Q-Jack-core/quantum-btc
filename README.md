@@ -25,20 +25,22 @@ Visit the [Releases page](https://github.com/Q-Jack-core/quantum-btc/releases) a
 
 ### 2. Launch the Engine
 
-**For Windows:**
-```text
-.\quantum-btc.exe
-```
+**For Windows (Easiest 1-Click Method):**
+We have eliminated all setup friction. You do not need to use the command line.
 
-> **⚠️ Windows Troubleshooting (Error 10013 / Not Recognized):**
-> *   **Command Not Recognized:** Ensure your command prompt is in the exact folder where the file is downloaded (e.g., type `cd C:\Users\YourName\Desktop` before launching).
-> *   **Error 10013 (PermissionDenied):** Windows is blocking the default P2P network port. To fix this, run the node on a different port by typing: `.\quantum-btc.exe --port 19999`
-> *   **Firewall Block:** Ensure your antivirus or Windows Defender Firewall is set to "Allow" `quantum-btc.exe` through both Private and Public networks.
+1. Unzip the downloaded `qbtc-core-windows.zip`.
+2. Double-click the `Start_Mining.bat` file.
+3. The engine will launch a step-by-step wizard. Follow the big green instructions on your screen to create your wallet, backup your seed phrase, and start auto-mining! *(Note: The Windows Port 10013 block is automatically bypassed).*
 
 **For macOS/Linux:**
-```text
+Open your terminal, navigate to the extracted folder, and grant execution permissions before running:
+
+```bash
+chmod +x quantum-btc
 ./quantum-btc
 ```
+
+*(After the node starts, type `wallet_gen your_name` and `auto_mine start your_name` as usual).*
 
 ### 3. Generate Wallet & Start Mining
 **Important: After launching the node for the first time, please wait a few minutes for the network synchronization to complete.** The node needs to download and verify the blockchain history before you can interact with it.
