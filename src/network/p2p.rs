@@ -94,10 +94,10 @@ pub fn build_swarm(storage_path: &str, is_seed_node: bool) -> Result<libp2p::Swa
 
     // High-Speed Point-to-Point Pipeline.
     // Timeout extended to 120s to accommodate trans-pacific ML-DSA-65 validation.
-    // Note: libp2p v0.53+ handles payload size dynamically via native Yamux stream chunking.
     let req_resp_config = request_response::Config::default()
         .with_request_timeout(Duration::from_secs(120));
-    
+        
+    // Initialize standard request-response protocol for block and mempool synchronization.
     let req_resp = request_response::cbor::Behaviour::<crate::network::SyncRequest, crate::network::SyncResponse>::new(
         [(StreamProtocol::new("/qbtc/sync/2.0.0"), request_response::ProtocolSupport::Full)],
         req_resp_config,
@@ -130,11 +130,22 @@ pub fn build_swarm(storage_path: &str, is_seed_node: bool) -> Result<libp2p::Swa
 
     let behaviour = QbtcBehaviour { gossipsub, mdns, identify, kad, req_resp, ping };
 
-    // CORE-V8 FIX: Relying on stable default multiplexer.
-    // libp2p 0.53+ Yamux natively handles 256KB physical chunking and dynamic window backpressure.
     let swarm = SwarmBuilder::with_existing_identity(local_key)
         .with_tokio()
-        .with_tcp(tcp::Config::default(), noise::Config::new, yamux::Config::default)?
+        .with_tcp(
+            tcp::Config::default(),
+            noise::Config::new,
+            // Wrap the Yamux configuration in a closure to satisfy the FnOnce trait bound.
+            // This cleanly breaks the 256KB physical transmission ceiling.
+            || {
+                let mut cfg = yamux::Config::default();
+                #[allow(deprecated)]
+                cfg.set_max_buffer_size(8 * 1024 * 1024);
+                #[allow(deprecated)]
+                cfg.set_receive_window_size(8 * 1024 * 1024);
+                cfg
+            }
+        )?
         // Wrap the TCP transport layer with a DNS resolver for seed domain resolution.
         .with_dns()?
         .with_behaviour(|_| behaviour).expect("Behaviour merged successfully")

@@ -57,7 +57,9 @@ pub struct BalanceRequest {
 pub struct BalanceResponse {
     pub address: String,
     pub confirmed_sats: u64, 
-    pub unconfirmed_sats: u64,
+    pub unconfirmed_sats: u64, 
+    pub pending_sats: u64,     
+    pub locked_sats: u64,      
 }
 
 #[derive(Deserialize)]
@@ -197,7 +199,13 @@ async fn get_tactical_balance(State(state): State<RpcState>, Json(req): Json<Bal
     }
 
     if !is_valid_target {
-        return Json(BalanceResponse { address: req.address, confirmed_sats: 0, unconfirmed_sats: 0 });
+        return Json(BalanceResponse { 
+            address: req.address, 
+            confirmed_sats: 0, 
+            unconfirmed_sats: 0,
+            pending_sats: 0,      // Added missing field to satisfy Rust compiler
+            locked_sats: 0        // Added missing field to satisfy Rust compiler
+        });
     }
 
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
@@ -211,11 +219,13 @@ async fn get_tactical_balance(State(state): State<RpcState>, Json(req): Json<Bal
     // FIX: Removed the underscore from '_pending_sats' to actively receive the mempool pending balance.
     let (mature_sats, pending_sats, locked_sats) = resp_rx.await.unwrap_or((0, 0, 0));
 
-    // FIX: Combine pending mempool funds and immature coinbase rewards to represent the total unconfirmed balance.
+    // FIX: Strictly decouple pending and locked states for accurate frontend display.
     Json(BalanceResponse { 
         address: req.address, 
         confirmed_sats: mature_sats, 
-        unconfirmed_sats: pending_sats + locked_sats 
+        unconfirmed_sats: pending_sats + locked_sats, // Fallback
+        pending_sats: pending_sats,
+        locked_sats: locked_sats,
     })
 }
 
