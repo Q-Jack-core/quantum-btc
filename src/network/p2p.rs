@@ -121,11 +121,12 @@ pub fn build_swarm(storage_path: &str, is_seed_node: bool) -> Result<libp2p::Swa
         kad.set_mode(Some(kad::Mode::Client));
     }
 
-    // libp2p 0.53+ enforcing strict drop mechanism against Slowloris attacks.
+    // Adapt ping protocol for 8MB trans-pacific Yamux pipelines.
+    // Increased interval and timeout prevent Ping from terminating healthy connections during heavy block transfers.
     let ping = libp2p::ping::Behaviour::new(
         libp2p::ping::Config::new()
-            .with_interval(Duration::from_secs(30))
-            .with_timeout(Duration::from_secs(20)),
+            .with_interval(Duration::from_secs(60))
+            .with_timeout(Duration::from_secs(120)),
     );
 
     let behaviour = QbtcBehaviour { gossipsub, mdns, identify, kad, req_resp, ping };
@@ -149,8 +150,8 @@ pub fn build_swarm(storage_path: &str, is_seed_node: bool) -> Result<libp2p::Swa
         // Wrap the TCP transport layer with a DNS resolver for seed domain resolution.
         .with_dns()?
         .with_behaviour(|_| behaviour).expect("Behaviour merged successfully")
-        // Extend idle timeout to 60s to prevent disconnects during heavy cryptographic validation.
-        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(60)))
+        // Extend idle timeout to 120s to prevent disconnects during heavy cryptographic validation and 8MB transfers.
+        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(120)))
         .build();
 
     Ok(swarm)
