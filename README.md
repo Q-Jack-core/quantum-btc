@@ -1,6 +1,5 @@
 # Quantum Bitcoin (Q-BTC) Core
 
-*Read this in other languages: [English](README.md), [简体中文](README_zh.md).*
 
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-blue.svg)](https://www.rust-lang.org)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
