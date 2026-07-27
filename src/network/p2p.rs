@@ -71,7 +71,7 @@ pub fn build_swarm(storage_path: &str, is_seed_node: bool) -> Result<libp2p::Swa
     
     let gossipsub_config = gossipsub::ConfigBuilder::default()
         .heartbeat_interval(Duration::from_secs(1)) 
-        .validation_mode(gossipsub::ValidationMode::Strict) 
+        .validation_mode(gossipsub::ValidationMode::Permissive)
         .message_id_fn(message_id_fn)
         // Limit Gossipsub transmit size to 2MB to prevent bandwidth amplification.
         .max_transmit_size(2 * 1024 * 1024) 

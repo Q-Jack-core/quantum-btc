@@ -29,9 +29,15 @@ We have eliminated all setup friction. You do not need to use the command line.
 
 1. Unzip the downloaded `qbtc-core-windows.zip`.
 2. Double-click the `Start_Mining.bat` file.
-3. The engine will launch a step-by-step wizard. Follow the big green instructions on your screen to create your wallet, backup your seed phrase, and start auto-mining! *(Note: The Windows Port 10013 block is automatically bypassed).*
+3. The engine will launch a step-by-step wizard. Follow the big instructions on your screen to create your wallet, backup your seed phrase, and start auto-mining! *(Note: The Windows Port 10013 block is automatically bypassed).*
 
-**For macOS/Linux:**
+**For macOS (Easiest 1-Click Method):**
+1. Extract the downloaded `qbtc-core-macos.tar.gz`.
+2. Double-click the `Start_Mining.command` file.
+*(Mac Security Note: If macOS blocks it with an "unidentified developer" warning, simply Right-Click the file, select "Open", and click "Open" again).*
+3. A terminal window will pop up with a colorful guide. Press [Enter], then follow the on-screen steps to generate your wallet and start mining!
+
+**For Linux (Terminal Method):**
 Open your terminal, navigate to the extracted folder, and grant execution permissions before running:
 
 ```bash

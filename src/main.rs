@@ -1871,7 +1871,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }; // Lock physically dropped here to prevent async deadlock.
 
                                     if !is_known && !in_flight_txs.contains(&tx_hash) {
-                                        // OOM bound sliding window eviction (Cache Flush Exploit protection).
+                                        // OOM bound sliding window eviction
                                         if in_flight_queue.len() >= 10000 {
                                             if let Some(oldest_hash) = in_flight_queue.pop_front() {
                                                 in_flight_txs.remove(&oldest_hash);
@@ -1880,12 +1880,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         in_flight_txs.insert(tx_hash);
                                         in_flight_queue.push_back(tx_hash);
                                         
-                                        let req = crate::network::SyncRequest::GetMempoolTx { 
-                                            tx_hash, 
-                                            requester: local_peer_id.to_string() 
-                                        };
-                                        let _ = swarm_cmd_tx.try_send(SwarmCommand::SendSyncReq(sender, req, Some(tx_hash)));
-                                        tracing::debug!("[INFO] Network: Emitted GetData for unknown INV: {:?}", tx_hash);
+                                        let swarm_cmd_tx_clone = swarm_cmd_tx.clone();
+                                        let requester_str = local_peer_id.to_string();
+                                        let mempool_clone = mempool.clone();
+                                        let peer_clone = sender;
+                                        
+                                        // Dynamic polling state machine
+                                        tokio::spawn(async move {
+                                            for _ in 1..=6 {
+                                                tokio::time::sleep(tokio::time::Duration::from_millis(500)).await;
+                                                
+                                                let is_solved = {
+                                                    let guard = safe_lock!(mempool_clone);
+                                                    guard.tx_pool.contains_key(&tx_hash)
+                                                };
+                                                
+                                                if is_solved { return; }
+                                                
+                                                let req = crate::network::SyncRequest::GetMempoolTx { 
+                                                    tx_hash, 
+                                                    requester: requester_str.clone() 
+                                                };
+                                                let _ = swarm_cmd_tx_clone.send(SwarmCommand::SendSyncReq(peer_clone, req, None)).await;
+                                            }
+                                        });
                                     }
                                 }
                                 NetworkPayload::BlockAnnouncement(header) => {
@@ -2354,18 +2372,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             crate::network::SyncResponse::MempoolTxResponse { tx, responder } => {
                                                 if let Some(tx) = tx {
                                                     let tx_hash = tx.calculate_id();
-                                                    /*  Tracker already cleared by global response handler. */
                                                     
                                                     let storage_worker = storage.clone();
                                                     let utxo_tx_worker = utxo_tx.clone();
                                                     let mempool_worker = mempool.clone();
                                                     let reputation_worker = reputation.clone();
                                                     let swarm_cmd_tx_worker = swarm_cmd_tx.clone();
-                                                    //  Inject async P2P transmitter to worker thread. Clone from origin to avoid move semantic violation.
                                                     let p2p_tx_worker = p2p_tx.clone();
+                                                    let engine_idle_notify_mempool = engine_idle_notify.clone();
                                                     
                                                     network_tasks.spawn(async move {
-                                                        //  FIX: Offload heavy ML-DSA-65 crypto verification to Tokio blocking thread
                                                         let tx_for_crypto = tx.clone();
                                                         let tx_hash_for_crypto = tx_hash;
                                                         
@@ -2384,32 +2400,27 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                                     let _ = swarm_cmd_tx_worker.send(SwarmCommand::BanAndDisconnect(peer_id)).await;
                                                                 }
                                                             }
-                                                            return; // Drop invalid tx instantly
+                                                            return;
                                                         }
 
                                                         let current_eval_height = storage_worker.get_chain_list().len() as u64;
                                                         let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
                                                         
-                                                        // Dispatch to UTXO Actor with crypto_pre_verified: true
                                                         if utxo_tx_worker.send(utxo::UtxoCommand::ValidateMempoolTx { tx: tx.clone(), current_height: current_eval_height, crypto_pre_verified: true, resp: resp_tx }).await.is_ok() {
                                                             match resp_rx.await.unwrap_or(Err("Actor Channel Closed")) {
                                                                 Ok(exact_fee) => {
-                                                                    //  Mempool Relay Policy Gatekeeper
-                                                                    // Enforce strict minimum relay fee without breaking consensus
                                                                     if exact_fee < 1000 {
                                                                         tracing::warn!("[WARN] Relay Policy: Transaction rejected. Fee {} too low.", exact_fee);
                                                                     } else {
-                                                                        //  Evaluate physical lock immediately to drop MutexGuard before async boundary.
                                                                         let add_result = safe_lock!(mempool_worker).add_transaction(tx, exact_fee);
                                                                         match add_result {
                                                                             Ok(_) => {
-                                                                                //  Elevate log level to info to expose successful mempool admission.
                                                                                 tracing::info!("[INFO] Mempool: Pulled transaction validated and admitted with fee {}.", exact_fee);
-                                                                                //  Causality lock. Broadcast INV only after physical verification and mempool admission.
                                                                                 let _ = p2p_tx_worker.send(crate::network::NetworkPayload::TransactionInv(tx_hash)).await;
+                                                                                // Interrupt miner to include new transaction
+                                                                                engine_idle_notify_mempool.notify_waiters();
                                                                             },
                                                                             Err(quantum_btc::mempool::blind_box::MempoolError::Tombstoned) => {
-                                                                                //  Ignore tombstoned transactions. Peer immunity granted to prevent network fractures.
                                                                                 tracing::debug!("[INFO] Firewall: Blocked tombstoned transaction. No penalty applied.");
                                                                             },
                                                                             Err(e) => tracing::debug!("[DEBUG] Mempool: Transaction rejected: {:?}", e),
@@ -2417,7 +2428,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                                     }
                                                                 }
                                                                 Err(e) => {
-                                                                    //  FIX: Smart Firewall. Differentiate contextual UTXO errors from cryptographic forgery.
                                                                     let err_str = e.to_string().to_lowercase();
                                                                     if err_str.contains("signature") || err_str.contains("crypto") {
                                                                         if let Ok(peer_id) = responder.parse::<libp2p::PeerId>() {
@@ -2427,7 +2437,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                                             }
                                                                         }
                                                                     } else {
-                                                                        // Silently drop transactions with missing UTXOs due to network race conditions.
                                                                         tracing::debug!("[INFO] Mempool: Transaction dropped due to UTXO context failure: {}", e);
                                                                     }
                                                                 }

@@ -101,9 +101,10 @@ impl ReputationManager {
         match offense {
             NetworkOffense::Timeout => {
                 profile.consecutive_timeouts += 1;
-                // Performance tolerance for trans-oceanic ML-DSA-65 transmission.
-                // Do not penalize score for network latency to prevent honest node blacklisting.
-                // Underlying libp2p timeout will automatically handle the stream teardown.
+                if profile.consecutive_timeouts > 3 {
+                    profile.score -= PENALTY_TIMEOUT;
+                    tracing::warn!("[WARN] Reputation: Peer {} consecutive timeouts reached {}, applying penalty.", peer_id, profile.consecutive_timeouts);
+                }
             },
             NetworkOffense::InvalidSignature => profile.score -= PENALTY_INVALID_SIG,
             NetworkOffense::MalformedData => profile.score -= PENALTY_MALFORMED_DATA,
