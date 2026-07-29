@@ -6,7 +6,6 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use crossbeam_channel::{Receiver, Sender};
 use std::time::{Instant, Duration};
-use num_cpus;
 
 // Global operational flags for Tier 0 isolation protocol.
 pub static MUTE_CONSOLE_LOGS: AtomicBool = AtomicBool::new(false);
@@ -78,8 +77,22 @@ impl Miner {
         });
 
         // 2. Dynamic Auto-Scaling CPU Infantry Phalanx (Adapts to local hardware)
-        let core_count = num_cpus::get() as u64;
-        miner_log!("[INFO] Miner: Detected {} physical/logical cores. Deploying parallel hash grid...", core_count);
+        // CORE-V2 FIX: Cgroup-aware parallelism detecting true available vCPUs safely.
+        let total_cores = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(1) as u64;
+        
+        // Smart dynamic isolation: Automatically reserve cores for OS and networking.
+        let core_count = if total_cores >= 8 {
+            total_cores - 2 // Heavy setups (8+ cores): Reserve 2 cores
+        } else if total_cores > 2 {
+            total_cores - 1 // Medium setups (3-7 cores): Reserve 1 core
+        } else {
+            1 // Low-end (1-2 cores): Guarantee 1 mining thread to prevent crash
+        };
+
+        miner_log!("[INFO] Miner: Detected {} vCPU. Deploying {} hash threads (Reserved {} for Network/OS).", 
+            total_cores, core_count, total_cores - core_count);
 
         for thread_id in 0..core_count {
             let template_reader = shared_template.clone();
@@ -143,6 +156,9 @@ impl Miner {
                         }
 
                         nonce = local_nonce;
+
+                        // Yield CPU time slice to prevent starving the Tokio async networking threads.
+                        std::thread::yield_now();
 
                         if puzzle_solved {
                             mining_flag_reader.store(false, Ordering::Relaxed);

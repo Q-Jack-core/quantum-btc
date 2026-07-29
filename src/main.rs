@@ -2954,13 +2954,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
                     }
                     
-                    // MAINNET FIX: Absolute Error Suppression (Display & Debug formats)
-                    // Keeps the terminal clean for critical consensus logs by capturing struct names via Debug formatting.
+                    
                     libp2p::swarm::SwarmEvent::OutgoingConnectionError { peer_id, error, .. } => {
                         let err_str = format!("{:?}", error); 
                         let err_str_display = error.to_string().to_lowercase();
                         if !err_str.contains("os error 32") && !err_str.contains("Broken pipe") && !err_str.contains("failed to resolve") 
-                            && !err_str.contains("os error 61") && !err_str.contains("Connection refused") && !err_str.contains("WrongPeerId") && !err_str_display.contains("wrong peer id") {
+                            && !err_str.contains("os error 61") && !err_str.contains("Connection refused") && !err_str.contains("WrongPeerId") && !err_str_display.contains("wrong peer id")
+                            && !err_str.contains("Timeout") {
                             tracing::warn!("[WARN] P2P: Outgoing connection error to {:?}: {:?}", peer_id, error);
                         }
                     }
