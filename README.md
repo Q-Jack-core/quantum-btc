@@ -15,6 +15,18 @@ Quantum Bitcoin (Q-BTC) is a post-quantum peer-to-peer electronic cash system bu
 
 You don't need to be a developer to support the network. Our pre-compiled binaries make it easy to participate immediately.
 
+### Option A: Desktop GUI Miner (Recommended for Beginners)
+The Q-BTC Desktop application provides a seamless, one-click graphical interface. No command line experience is required!
+
+1. **Download the App:** Visit the [Q-BTC Desktop Releases page](https://github.com/Q-Jack-core/qbtc-desktop/releases) and download the `.dmg` file (for macOS) or `.exe` file (for Windows).
+2. **Generate a Wallet:** Open the application and click the **"Generate New Wallet"** button.
+3. **Backup Your Keys:** **CRITICAL:** Carefully write down your public address and your 12-word seed phrase on a physical piece of paper. This is the *only* way to recover your assets.
+4. **Start Mining:** Once your wallet is secured, enter your wallet details into the input field and click the **"Start Mining"** button. The application will handle the rest!
+
+---
+
+### Option B: Core Node CLI (For Servers & Advanced Users)
+
 ### 1. Download Your Mining Engine
 Visit the [Releases page](https://github.com/Q-Jack-core/quantum-btc/releases) and download the file for your system:
 
@@ -63,6 +75,10 @@ Step B: Start automated mining:
 auto_mine start mywallet
 ```
 You will see the node begin processing hash iterations immediately. Your computer is now actively securing the Q-BTC network!
+
+### Option C: Stratum Pool Mining (For Advanced Hash Farms)
+If you are operating a large-scale mining farm and wish to aggregate hash power via the Stratum protocol, please refer to our dedicated mining pool gateway repository for deployment instructions:
+👉 [Q-BTC Stratum Pool Infrastructure](https://github.com/Q-Jack-core/qbtc-stratum-pool)
 
 ---
 
