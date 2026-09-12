@@ -4,9 +4,12 @@ pub mod asert;
 use crate::block::Block;
 use std::time::{SystemTime, UNIX_EPOCH};
 use sha2::{Sha256, Digest};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 // Max future time allowance (1 hour)
 pub const MAX_FUTURE_TIME_SECS: u64 = 3600; 
+
+static LAST_PRINTED_HEIGHT: AtomicU64 = AtomicU64::new(0);
 
 pub struct ConsensusEngine;
 
@@ -40,7 +43,12 @@ impl ConsensusEngine {
             height_diff
         );
 
-        println!("[INFO] Block {}: Target 0x{:016x}", chain_length, final_target);
+        // Log target only once per block height
+        let last_printed = LAST_PRINTED_HEIGHT.load(Ordering::Relaxed);
+        if chain_length != last_printed {
+            println!("[INFO] Block {}: Target 0x{:016x}", chain_length, final_target);
+            LAST_PRINTED_HEIGHT.store(chain_length, Ordering::Relaxed);
+        }
 
         final_target
     }

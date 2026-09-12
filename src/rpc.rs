@@ -1,8 +1,10 @@
 // src/rpc.rs
 use axum::{
-    extract::State,
+    extract::{State, Request},
     routing::{get, post},
     Json, Router,
+    middleware::{self, Next},
+    response::Response,
 };
 use tower_http::cors::{Any, CorsLayer};
 use serde::{Deserialize, Serialize};
@@ -108,35 +110,61 @@ pub struct VerifyTargetResponse {
     pub message: String,
 }
 
+async fn token_auth(req: Request, next: Next) -> Result<Response, axum::http::StatusCode> {
+    let expected = std::env::var("QBTC_RPC_TOKEN").unwrap_or_default();
+    if expected.is_empty() { return Ok(next.run(req).await); }
+    
+    if let Some(auth) = req.headers().get(axum::http::header::AUTHORIZATION) {
+        if let Ok(token) = auth.to_str() {
+            if token == expected { return Ok(next.run(req).await); }
+        }
+    }
+    Err(axum::http::StatusCode::UNAUTHORIZED)
+}
 pub async fn start_rpc_server(port: u16, state: RpcState) {
     let rpc_port = port + 4000;
     let addr = SocketAddr::from(([127, 0, 0, 1], rpc_port));
     
-    let cors = CorsLayer::new().allow_origin(Any).allow_methods(Any).allow_headers(Any);
+    let cors = CorsLayer::new()
+        .allow_origin(Any)
+        .allow_methods(Any)
+        .allow_headers(Any);
     
-    // Convert 'app' to mutable to allow conditional route mounting
-    let mut app = Router::new()
+    let app = Router::new()
         .route("/api/get_info", get(get_node_info))
         .route("/api/get_balance", post(get_tactical_balance)) 
         .route("/api/execute_transfer", post(execute_transfer)) 
         .route("/api/wallet_gen", post(api_wallet_gen))
         .route("/api/wallet_restore", post(api_wallet_restore))
+        .route("/api/wallet_unlock", post(api_wallet_unlock))
         .route("/api/tx_status", post(get_tx_status))
-        .route("/api/verify_target", post(verify_tactical_target));
+        .route("/api/verify_target", post(verify_tactical_target))
+        .route("/api/get_block_template", post(api_get_block_template))
+        .route("/api/submit_block", post(api_submit_block))
+        .route("/api/get_block", post(get_block_by_height));
 
-    // CORE DEFENSE SWITCH: Mount the block explorer API only if the specific flag is enabled
-    // This isolates standard miners from potential DDoS or I/O bottleneck attacks.
-    if state.explorer_enabled {
-        app = app.route("/api/get_block", post(get_block_by_height));
-        println!("[WARN] ⚠️ EXPLORER API ENABLED: Block data is publicly accessible on port {}.", rpc_port);
-    }
-
-    // Apply CORS layer and state after all routes are conditionally mounted
-    let app = app.layer(cors).with_state(state); 
+    let app = app.route_layer(middleware::from_fn(token_auth)).layer(cors).with_state(state);
 
     println!("[INFO] RPC: Server listening on http://127.0.0.1:{}", rpc_port);
     let listener = TcpListener::bind(addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+async fn api_wallet_unlock(State(state): State<RpcState>, Json(req): Json<WalletActionReq>) -> Json<WalletActionRes> {
+    let pwd = req.password.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "CLI_DEFAULT_LOCK".to_string());
+    match crate::wallet::QuantumWallet::load_from_disk_secure(&state.datadir, &req.wallet_name, &pwd) {
+        Ok(w) => Json(WalletActionRes {
+            success: true,
+            message: "Vault unlocked successfully.".to_string(),
+            address: Some(w.qbtc_address),
+            mnemonic: None
+        }),
+        Err(e) => Json(WalletActionRes {
+            success: false,
+            message: format!("Access Denied: {}", e),
+            address: None,
+            mnemonic: None
+        })
+    }
 }
 
 async fn api_wallet_gen(State(state): State<RpcState>, Json(req): Json<WalletActionReq>) -> Json<WalletActionRes> {
@@ -273,22 +301,60 @@ async fn execute_transfer(State(state): State<RpcState>, Json(req): Json<Transfe
         amount_str.parse::<u64>().unwrap_or(0).saturating_mul(100_000_000)
     };
 
-    let fee_atomic: u64 = 10000;
-    let total_required = amount_atomic + fee_atomic;
-
     let mut root_h = Sha256::new(); root_h.update(&my_wallet.public_key);
     let my_pk_hash: [u8; 32] = root_h.finalize().into();
 
     let pending_txs: Vec<Transaction> = state.mempool.lock().unwrap().get_txs_for_mining();
-    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-    let _ = state.utxo_tx.send(crate::utxo::UtxoCommand::GetSpendable { 
-        pubkey_hash: my_pk_hash, 
-        current_height, 
-        required_amount: total_required, 
-        pending_txs,
-        resp: resp_tx 
-    }).await;
-    let utxo_query_result = resp_rx.await.unwrap_or(Err("INSUFFICIENT FUNDS OR UTXOS LOCKED BY OTHER THREADS."));
+    
+    let network_fee_rate: u64 = crate::config::MIN_RELAY_FEE_RATE * 5;
+    const TX_BASE_BYTES: u64 = 30;
+    const TX_IN_BYTES: u64 = 5350;
+    const TX_OUT_BYTES: u64 = 50;
+
+    let mut target_fee_atomic: u64 = (TX_BASE_BYTES + TX_IN_BYTES + (2 * TX_OUT_BYTES)) * network_fee_rate;
+    let mut _utxo_query_result = Err("Insufficient deep liquidity to cover transaction.");
+
+    for _iteration in 0..5 {
+        let current_total_required = amount_atomic + target_fee_atomic;
+        let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+        
+        let _ = state.utxo_tx.send(crate::utxo::UtxoCommand::GetSpendable {
+            pubkey_hash: my_pk_hash,
+            current_height,
+            required_amount: current_total_required,
+            pending_txs: pending_txs.clone(),
+            resp: resp_tx
+        }).await;
+
+        match resp_rx.await.unwrap_or(Err("Actor Channel Closed")) {
+            Ok((selected, gathered)) => {
+                let input_count = selected.len() as u64;
+                let projected_bytes = TX_BASE_BYTES + (input_count * TX_IN_BYTES) + (2 * TX_OUT_BYTES);
+                
+                if projected_bytes > 8_000_000 {
+                    _utxo_query_result = Err("Transaction exceeds 8MB physical limit");
+                    break;
+                }
+                
+                let projected_fee = projected_bytes * network_fee_rate;
+                
+                if gathered >= amount_atomic + projected_fee {
+                    target_fee_atomic = projected_fee;
+                    _utxo_query_result = Ok((selected, gathered));
+                    break;
+                } else {
+                    target_fee_atomic = projected_fee;
+                }
+            }
+            Err(e) => {
+                _utxo_query_result = Err(e);
+                break;
+            }
+        }
+    }
+
+    let utxo_query_result = _utxo_query_result;
+    let total_required = amount_atomic + target_fee_atomic;
 
     match utxo_query_result {
         Ok((gathered_utxos, total_gathered)) => {
@@ -322,22 +388,27 @@ async fn execute_transfer(State(state): State<RpcState>, Json(req): Json<Transfe
 
             let eval_height = state.storage.get_chain_list().len() as u64;
             let (val_tx, val_rx) = tokio::sync::oneshot::channel();
-            // Require strict crypto verification for external RPC injections.
             let _ = state.utxo_tx.send(crate::utxo::UtxoCommand::ValidateMempoolTx { tx: tx.clone(), current_height: eval_height, crypto_pre_verified: false, resp: val_tx }).await;
             
-            if val_rx.await.unwrap_or(Err("Actor Channel Closed")).is_ok() {
-                // Execute admission synchronously and drop the MutexGuard immediately to preserve Send trait.
-                let admission_result = state.mempool.lock().unwrap().add_transaction(tx.clone(), fee_atomic);
-                
-                if admission_result.is_ok() {
-                    let _ = state.p2p_tx.send(NetworkPayload::TransactionInv(tx.calculate_id())).await;
-                    let hash_hex: String = tx_hash.iter().map(|b| format!("{:02x}", b)).collect();
-                    return Json(ApiResponse { success: true, message: "Transaction broadcasted.".to_string(), tx_hash: Some(hash_hex) });
-                } else {
-                    return Json(ApiResponse { success: false, message: "Mempool rejected the transaction.".to_string(), tx_hash: None });
+            match val_rx.await.unwrap_or(Err("Actor Channel Closed")) {
+                Ok(exact_fee) => {
+                    if exact_fee < 1000 {
+                        return Json(ApiResponse { success: false, message: "Fee too low.".to_string(), tx_hash: None });
+                    }
+                    
+                    let admission_result = state.mempool.lock().unwrap().add_transaction(tx.clone(), exact_fee);
+                    
+                    if admission_result.is_ok() {
+                        let _ = state.p2p_tx.send(NetworkPayload::TransactionInv(tx.calculate_id())).await;
+                        let hash_hex: String = tx_hash.iter().map(|b| format!("{:02x}", b)).collect();
+                        return Json(ApiResponse { success: true, message: "Transaction broadcasted.".to_string(), tx_hash: Some(hash_hex) });
+                    } else {
+                        return Json(ApiResponse { success: false, message: "Mempool rejected the transaction.".to_string(), tx_hash: None });
+                    }
                 }
-            } else {
-                return Json(ApiResponse { success: false, message: "UTXO validation failed.".to_string(), tx_hash: None });
+                Err(_) => {
+                    return Json(ApiResponse { success: false, message: "UTXO validation failed.".to_string(), tx_hash: None });
+                }
             }
         }
         Err(e) => Json(ApiResponse { success: false, message: e.to_string(), tx_hash: None }),
@@ -384,6 +455,27 @@ pub struct BlockRequest {
 }
 
 #[derive(Serialize)]
+pub struct TxInputDetail {
+    pub prev_txid: String,
+    pub vout: u32,
+}
+
+#[derive(Serialize)]
+pub struct TxOutputDetail {
+    pub value_sats: u64,
+    pub address_hash: String,
+}
+
+#[derive(Serialize)]
+pub struct TxDetailResponse {
+    pub txid: String,
+    pub inputs: Vec<TxInputDetail>,
+    pub outputs: Vec<TxOutputDetail>,
+    pub is_quantum_secured: bool,
+    pub witness_size_bytes: usize,
+}
+
+#[derive(Serialize)]
 pub struct BlockResponse {
     pub height: u64,
     pub timestamp: u64,
@@ -393,6 +485,7 @@ pub struct BlockResponse {
     pub nonce: u64,
     pub target: u64,
     pub tx_count: usize,
+    pub transactions: Vec<TxDetailResponse>,
 }
 
 async fn get_block_by_height(State(state): State<RpcState>, Json(req): Json<BlockRequest>) -> Json<Option<BlockResponse>> {
@@ -407,6 +500,30 @@ async fn get_block_by_height(State(state): State<RpcState>, Json(req): Json<Bloc
         let merkle_hex: String = block.header.merkle_root.iter().map(|b| format!("{:02x}", b)).collect();
         let commit_merkle_hex: String = block.header.commit_merkle_root.iter().map(|b| format!("{:02x}", b)).collect();
 
+        let tx_details: Vec<TxDetailResponse> = block.transactions.iter().map(|tx| {
+            let txid_hex = tx.calculate_id().iter().map(|b| format!("{:02x}", b)).collect();
+            
+            let inputs_detail = tx.inputs.iter().map(|vin| TxInputDetail {
+                prev_txid: vin.previous_output_hash.iter().map(|b| format!("{:02x}", b)).collect(),
+                vout: vin.vout,
+            }).collect();
+
+            let outputs_detail = tx.outputs.iter().map(|vout| TxOutputDetail {
+                value_sats: vout.value,
+                address_hash: vout.public_key_hash.iter().map(|b| format!("{:02x}", b)).collect(),
+            }).collect();
+
+            let witness_size = tx.witnesses.iter().map(|w| w.signature.len() + w.public_key.len()).sum();
+
+            TxDetailResponse {
+                txid: txid_hex,
+                inputs: inputs_detail,
+                outputs: outputs_detail,
+                is_quantum_secured: !tx.witnesses.is_empty(),
+                witness_size_bytes: witness_size,
+            }
+        }).collect();
+
         return Json(Some(BlockResponse {
             height: req.height,
             timestamp: block.header.timestamp,
@@ -416,7 +533,145 @@ async fn get_block_by_height(State(state): State<RpcState>, Json(req): Json<Bloc
             nonce: block.header.nonce,
             target: block.header.target,
             tx_count: block.transactions.len(),
+            transactions: tx_details,
         }));
     }
     Json(None)
+}
+
+
+// =============================================================================
+// STRATUM POOL GATEWAY API (LAYER 2 INTEGRATION)
+// =============================================================================
+
+#[derive(Deserialize)]
+pub struct GetBlockTemplateReq {
+    pub miner_address: String,
+}
+
+#[derive(Serialize)]
+pub struct GetBlockTemplateRes {
+    pub previous_hash: String,
+    pub current_height: u64,
+    pub target: u64,
+    pub transactions: Vec<Transaction>,
+}
+
+#[derive(Deserialize)]
+pub struct SubmitBlockReq {
+    pub block: Block,
+}
+
+async fn api_get_block_template(State(state): State<RpcState>, Json(req): Json<GetBlockTemplateReq>) -> Json<Option<GetBlockTemplateRes>> {
+    let mut miner_pk_hash = [0u8; 32];
+    if let Some(decoded) = crate::wallet::QuantumWallet::decode_qbtc_address(&req.miner_address) {
+        miner_pk_hash.copy_from_slice(&decoded[0..32]);
+    } else {
+        return Json(None); 
+    }
+
+    let chain = state.storage.get_chain_list();
+    let current_height = chain.len() as u64;
+    
+    let tip_hash = chain.last().copied().unwrap_or([0u8; 32]);
+    let genesis_hash = chain.first().copied().unwrap_or([0u8; 32]);
+    
+    let tip_idx = state.storage.get_block_index(&tip_hash).unwrap();
+    let genesis_idx = state.storage.get_block_index(&genesis_hash).unwrap();
+    
+    // Dynamic ASERTi3-2d target recalculation for external Stratum nodes.
+    let target = crate::consensus::ConsensusEngine::calculate_next_target(
+        genesis_idx.header.timestamp,
+        genesis_idx.header.target,
+        tip_idx.header.timestamp,
+        current_height
+    );
+
+    let mut total_fees = 0u64;
+    let mut txs = {
+        let mempool_guard = state.mempool.lock().unwrap();
+        let selected = mempool_guard.get_txs_for_mining();
+        for tx in &selected {
+            let tx_hash = tx.calculate_id();
+            if let Some(entry) = mempool_guard.tx_pool.get(&tx_hash) {
+                total_fees += entry.fee;
+            }
+        }
+        selected
+    };
+
+    let coinbase_in = TxIn { previous_output_hash: [0u8; 32], vout: current_height as u32 };
+    let coinbase_witness = TxWitness { signature: vec![], public_key: vec![] };
+    let block_reward = crate::economics::CentralBank::get_block_reward(current_height) + total_fees;
+
+    txs.insert(0, Transaction {
+        inputs: vec![coinbase_in],
+        outputs: vec![TxOut { value: block_reward, public_key_hash: miner_pk_hash, recovery: None }],
+        witnesses: vec![coinbase_witness]
+    });
+
+    let previous_hash: String = tip_hash.iter().map(|b| format!("{:02x}", b)).collect();
+
+    Json(Some(GetBlockTemplateRes {
+        previous_hash,
+        current_height,
+        target,
+        transactions: txs,
+    }))
+}
+
+async fn api_submit_block(State(state): State<RpcState>, Json(req): Json<SubmitBlockReq>) -> Json<ApiResponse> {
+    let block = req.block;
+    let hash = block.calculate_hash();
+    
+    // 1. Cheap PoW Interceptor (DDoS protection layer).
+    let hash_u64 = u64::from_be_bytes(hash[..8].try_into().unwrap());
+    if hash_u64 > block.header.target {
+        return Json(ApiResponse { success: false, message: "Rejected: Invalid PoW".to_string(), tx_hash: None });
+    }
+
+    // 2. Tip validation to prevent stale submissions.
+    let tip_hash = state.latest_block.lock().unwrap().calculate_hash();
+    if block.header.previous_hash != tip_hash {
+        return Json(ApiResponse { success: false, message: "Rejected: Orphan block or invalid tip".to_string(), tx_hash: None });
+    }
+
+    let current_height = state.storage.get_chain_list().len() as u64;
+
+    // 3. Dispatch to isolated UtxoActor for ML-DSA-65 validation.
+    let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
+    let _ = state.utxo_tx.send(crate::utxo::UtxoCommand::ApplyBlock {
+        block: block.clone(),
+        height: current_height,
+        is_historical: false,
+        resp: resp_tx,
+    }).await;
+
+    match resp_rx.await.unwrap_or(Err("Actor Channel Closed")) {
+        Ok(undo_log) => {
+            // 4. Physical Commit Pipeline.
+            let prev_hash = block.header.previous_hash;
+            let current_work = state.storage.get_block_index(&prev_hash).map(|idx| idx.chain_work).unwrap_or(0);
+            let new_work = current_work.saturating_add(block.header.get_block_proof());
+
+            let (snap_tx, snap_rx) = tokio::sync::oneshot::channel();
+            let _ = state.utxo_tx.send(crate::utxo::UtxoCommand::GetSnapshot { resp: snap_tx }).await;
+            let utxo_snap = snap_rx.await.unwrap();
+
+            state.storage.commit_state_transition(block.clone(), current_height, &undo_log, &utxo_snap, new_work);
+
+            // 5. Memory Pointer Updates.
+            *state.latest_block.lock().unwrap() = block.clone();
+            state.mempool.lock().unwrap().atomic_sweep(&block.transactions);
+
+            // 6. Network Broadcast via Gossipsub.
+            let _ = state.p2p_tx.send(NetworkPayload::BlockAnnouncement(block.header.clone())).await;
+
+            let hash_hex: String = hash.iter().map(|b| format!("{:02x}", b)).collect();
+            Json(ApiResponse { success: true, message: "Block accepted and broadcasted".to_string(), tx_hash: Some(hash_hex) })
+        }
+        Err(e) => {
+            Json(ApiResponse { success: false, message: format!("Rejected by Consensus: {}", e), tx_hash: None })
+        }
+    }
 }
