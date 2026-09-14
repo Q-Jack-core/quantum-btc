@@ -11,6 +11,15 @@ Quantum Bitcoin (Q-BTC) is a post-quantum peer-to-peer electronic cash system bu
 
 ---
 
+## 💬 Official Community & 20,000 Blocks Milestone
+
+**The Q-BTC mainnet has successfully crossed the 20,000 block milestone!** 
+To coordinate network upgrades, gather miner feedback, and discuss the future roadmap, all active miners and early believers are welcome to join the Genesis Members.
+
+👉 **Official Telegram:** [https://t.me/qbtc_genesis](https://t.me/qbtc_genesis)
+
+---
+
 ## 🚀 Quick Start: Join the Network
 
 You don't need to be a developer to support the network. Our pre-compiled binaries make it easy to participate immediately.
@@ -137,6 +146,6 @@ cargo run --release
 ---
 
 ## ⚠️ Disclaimer
-**The Q-BTC mainnet has successfully crossed the 10,000-block genesis stress phase and is now entering wild hash-rate expansion.** While the post-quantum baseline has been practically validated, this remains a hardcore cryptography experiment. This software is provided "as-is" without commercial promises or VC bailouts. Participate, secure the network, and bear the risks at your own discretion.
+**The Q-BTC mainnet has successfully crossed the 20,000-block milestone and is now entering wild hash-rate expansion.** While the post-quantum baseline has been practically validated, this remains a hardcore cryptography experiment. This software is provided "as-is" without commercial promises or VC bailouts. Participate, secure the network, and bear the risks at your own discretion.
 
 📄 **[Read the Official Genesis Whitepaper V2.0](./Q-BTC%20Whitepaper%20V2.0.pdf)**
