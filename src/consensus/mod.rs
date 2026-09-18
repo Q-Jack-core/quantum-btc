@@ -9,6 +9,8 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // Max future time allowance (1 hour)
 pub const MAX_FUTURE_TIME_SECS: u64 = 3600; 
 
+pub const MAX_TARGET: u64 = 0x0000_00FF_FFFF_FFFF;
+
 static LAST_PRINTED_HEIGHT: AtomicU64 = AtomicU64::new(0);
 
 pub struct ConsensusEngine;
@@ -95,6 +97,33 @@ impl ConsensusEngine {
             return Err("Security: Block timestamp MUST be strictly greater than MTP-11 (Median Time Past).");
         }
 
+        Ok(())
+    }
+
+
+    pub fn required_target(
+        anchor_timestamp: u64,
+        anchor_target: u64,
+        parent_timestamp: u64,
+        height: u64,
+    ) -> u64 {
+        Self::calculate_next_target(anchor_timestamp, anchor_target, parent_timestamp, height)
+            .min(MAX_TARGET)
+    }
+
+    pub fn verify_block_target_and_pow(
+        block: &Block,
+        required: u64,
+    ) -> Result<(), &'static str> {
+        if block.header.target > MAX_TARGET {
+            return Err("Consensus Violation: target above network maximum.");
+        }
+        if block.header.target != required {
+            return Err("Consensus Violation: declared target does not match the required target.");
+        }
+        if !Self::verify_proof_of_work(block, required) {
+            return Err("Consensus Violation: insufficient proof-of-work.");
+        }
         Ok(())
     }
 
@@ -188,3 +217,5 @@ pub fn verify_checkpoint(height: u64, block_hash: &[u8; 32]) -> Result<(), &'sta
     }
     Ok(())
 }
+
+

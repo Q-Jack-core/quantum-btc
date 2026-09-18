@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use serde::{Serialize, Deserialize};
-use crate::transaction::{Transaction, TxIn, TxOut, OutPoint};
+use crate::transaction::{Transaction, TxIn, TxOut, OutPoint, TxWitness};
 use crate::block::Block;
 
 // Consensus Constants
@@ -260,8 +260,13 @@ impl UtxoState {
             }
 
             //  Q-SigCache optimization. Bypasses ML-DSA-65 matrices if verified in mempool.
+            let owner_ok = tx.witnesses.get(i)
+                .map(|w| Self::witness_key_matches_owner(w, &record.output))
+                .unwrap_or(false);
             let is_primary = if tx.witnesses.is_empty() {
                 if is_historical { true } else { return Err("Consensus Violation: Missing witness."); }
+            } else if !owner_ok {
+                false
             } else if self.verified_tx_cache.contains(&tx_core_hash) {
                 true
             } else {
@@ -295,7 +300,17 @@ impl UtxoState {
         // Calculate and return the implicit transaction fee.
         Ok(input_sum - output_sum)
     }
-
+    
+    fn witness_key_matches_owner(witness: &TxWitness, output: &TxOut) -> bool {
+        use sha2::{Digest, Sha256};
+        if witness.public_key.is_empty() {
+            return false;
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(&witness.public_key);
+        let computed: [u8; 32] = hasher.finalize().into();
+        computed == output.public_key_hash
+    }
     /// Validates recovery hash reveal against the on-chain recovery data.
     fn verify_recovery_reveal(&self, tx: &Transaction, input_idx: usize, target_hash: &[u8; 32]) -> bool {
         // 1. Verify witness existence
@@ -413,12 +428,15 @@ impl UtxoState {
         // Executes heavy ML-DSA-65 matrices on all CPU cores simultaneously.
         use rayon::prelude::*;
         let all_signatures_valid = signature_tasks.par_iter().all(|(tx, i, tx_core_hash, record)| {
+            let owner_ok = tx.witnesses.get(*i)
+                .map(|w| Self::witness_key_matches_owner(w, &record.output))
+                .unwrap_or(false);
             if tx.witnesses.is_empty() {
                 is_historical
-            } else if self.verified_tx_cache.contains(tx_core_hash) {
+            } else if owner_ok && self.verified_tx_cache.contains(tx_core_hash) {
                 true
             } else {
-                let is_primary = tx.verify_witness(*i, tx_core_hash);
+                let is_primary = owner_ok && tx.verify_witness(*i, tx_core_hash);
                 if !is_primary {
                     if let Some(recovery) = &record.output.recovery {
                         let activation_height = record.height + recovery.recovery_delay + RECOVERY_CHALLENGE_WINDOW;
@@ -610,4 +628,6 @@ impl UtxoActor {
         });
     }
 }
+
+
 

@@ -246,7 +246,7 @@ impl QuantumStorage {
                 block_hash: *hash,
                 header: header.clone(),
                 height: b_height, 
-                chain_work: prev_work + 1,
+                chain_work: prev_work.saturating_add(header.get_block_proof()),
                 has_data: false,
             };
             self.save_block_index(b_index);

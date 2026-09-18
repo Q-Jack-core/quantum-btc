@@ -580,7 +580,7 @@ async fn api_get_block_template(State(state): State<RpcState>, Json(req): Json<G
     let genesis_idx = state.storage.get_block_index(&genesis_hash).unwrap();
     
     // Dynamic ASERTi3-2d target recalculation for external Stratum nodes.
-    let target = crate::consensus::ConsensusEngine::calculate_next_target(
+    let target = crate::consensus::ConsensusEngine::required_target(
         genesis_idx.header.timestamp,
         genesis_idx.header.target,
         tip_idx.header.timestamp,
@@ -623,20 +623,43 @@ async fn api_get_block_template(State(state): State<RpcState>, Json(req): Json<G
 async fn api_submit_block(State(state): State<RpcState>, Json(req): Json<SubmitBlockReq>) -> Json<ApiResponse> {
     let block = req.block;
     let hash = block.calculate_hash();
-    
-    // 1. Cheap PoW Interceptor (DDoS protection layer).
-    let hash_u64 = u64::from_be_bytes(hash[..8].try_into().unwrap());
-    if hash_u64 > block.header.target {
-        return Json(ApiResponse { success: false, message: "Rejected: Invalid PoW".to_string(), tx_hash: None });
-    }
 
-    // 2. Tip validation to prevent stale submissions.
+    // 1. Tip validation to prevent stale submissions.
     let tip_hash = state.latest_block.lock().unwrap().calculate_hash();
     if block.header.previous_hash != tip_hash {
         return Json(ApiResponse { success: false, message: "Rejected: Orphan block or invalid tip".to_string(), tx_hash: None });
     }
 
     let current_height = state.storage.get_chain_list().len() as u64;
+
+    // 2. PoW Validation with Hard Fork Gating
+    if current_height >= crate::config::CONSENSUS_HARDFORK_V2_HEIGHT {
+        let chain = state.storage.get_chain_list();
+        let genesis_hash = chain.first().copied().unwrap_or([0u8; 32]);
+        let genesis_idx = match state.storage.get_block_index(&genesis_hash) {
+            Some(idx) => idx,
+            None => return Json(ApiResponse { success: false, message: "Storage error: missing genesis".to_string(), tx_hash: None }),
+        };
+        let tip_idx = match state.storage.get_block_index(&tip_hash) {
+            Some(idx) => idx,
+            None => return Json(ApiResponse { success: false, message: "Storage error: missing tip".to_string(), tx_hash: None }),
+        };
+
+        let required = crate::consensus::ConsensusEngine::required_target(
+            genesis_idx.header.timestamp,
+            genesis_idx.header.target,
+            tip_idx.header.timestamp,
+            current_height,
+        );
+        if let Err(e) = crate::consensus::ConsensusEngine::verify_block_target_and_pow(&block, required) {
+            return Json(ApiResponse { success: false, message: format!("Rejected: {e}"), tx_hash: None });
+        }
+    } else {
+        let hash_u64 = u64::from_be_bytes(hash[..8].try_into().unwrap());
+        if hash_u64 > block.header.target {
+            return Json(ApiResponse { success: false, message: "Rejected: Invalid PoW".to_string(), tx_hash: None });
+        }
+    }
 
     // 3. Dispatch to isolated UtxoActor for ML-DSA-65 validation.
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();

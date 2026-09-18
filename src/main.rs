@@ -594,9 +594,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             }
 
             // L0 DEFENSE: Cryptographic Proof-of-Work and Merkle Tree verification.
+            let is_fork_active = incoming_height >= quantum_btc::config::CONSENSUS_HARDFORK_V2_HEIGHT;
+            let pow_check_result = if is_fork_active {
+                let required = consensus::ConsensusEngine::required_target(
+                    anchor_time_worker.load(Ordering::Relaxed),
+                    anchor_target_worker.load(Ordering::Relaxed),
+                    current_latest.header.timestamp,
+                    incoming_height,
+                );
+                consensus::ConsensusEngine::verify_block_target_and_pow(&incoming_block, required)
+            } else {
+                if consensus::ConsensusEngine::verify_proof_of_work(&incoming_block, incoming_block.header.target) {
+                    Ok(())
+                } else {
+                    Err("Consensus Violation: insufficient proof-of-work (legacy).")
+                }
+            };
+
             if sender_worker != thread_local_peer_id {
-                if !consensus::ConsensusEngine::verify_proof_of_work(&incoming_block, incoming_block.header.target) {
-                    tracing::error!("[ERROR] Firewall: Invalid Proof-of-Work! Malicious peer detected.");
+                if let Err(e) = pow_check_result {
+                    tracing::error!("[ERROR] Firewall: PoW check failed: {}. Malicious peer detected.", e);
                     let _ = safe_lock!(reputation_worker).report_offense(&sender_worker, NetworkOffense::InvalidHeader); 
                     let _ = swarm_cmd_tx_worker.try_send(SwarmCommand::BanAndDisconnect(sender_worker));
                     continue;
@@ -608,11 +625,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     continue;
                 }
             } else {
-                // FIX: Authenticate local origin to prevent executioner self-ban.
                 tracing::debug!("[INFO] Firewall: Local origin authenticated. Bypassing P2P punitive filters.");
-                if !consensus::ConsensusEngine::verify_proof_of_work(&incoming_block, incoming_block.header.target) || !consensus::ConsensusEngine::verify_merkle_root(&incoming_block) {
+                if pow_check_result.is_err() || !consensus::ConsensusEngine::verify_merkle_root(&incoming_block) {
                     tracing::error!("[ERROR] Firewall: Local block cryptographic validation failed. Dropping block safely.");
-                    engine_idle_notify_worker.notify_waiters(); // FIX: Prevent local miner deadlock on rejection
+                    engine_idle_notify_worker.notify_waiters();
                     continue;
                 }
             }
@@ -2526,8 +2542,29 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     return None;
                                                 }
 
-                                                // Cryptographic validation.
-                                                if !consensus::ConsensusEngine::verify_proof_of_work(b, b.header.target) || !consensus::ConsensusEngine::verify_merkle_root(b) {
+                                                // Cryptographic validation with parent-derived required target (A2 Fix)
+                                                let parent_idx = storage_clone.get_block_index(&b.header.previous_hash)
+                                                    .or_else(|| local_block_cache.get(&b.header.previous_hash).cloned());
+                                                
+                                                let pow_valid = match parent_idx {
+                                                    Some(p) => {
+                                                        if eval_height >= quantum_btc::config::CONSENSUS_HARDFORK_V2_HEIGHT {
+                                                            let req = consensus::ConsensusEngine::required_target(
+                                                                anchor_time_worker_clone.load(Ordering::Relaxed),
+                                                                anchor_target_worker_clone.load(Ordering::Relaxed),
+                                                                p.header.timestamp,
+                                                                eval_height,
+                                                            );
+                                                            consensus::ConsensusEngine::verify_block_target_and_pow(b, req).is_ok()
+                                                        } else {
+                                                            consensus::ConsensusEngine::verify_proof_of_work(b, b.header.target)
+                                                        }
+                                                    }
+                                                    None => eval_height < quantum_btc::config::CONSENSUS_HARDFORK_V2_HEIGHT
+                                                        && consensus::ConsensusEngine::verify_proof_of_work(b, b.header.target),
+                                                };
+
+                                                if !pow_valid || !consensus::ConsensusEngine::verify_merkle_root(b) {
                                                     tracing::error!("[ERROR] Sync: Cryptographic validation failed. Halting assembly.");
                                                     if let Ok(bad_peer) = responder_str.parse::<libp2p::PeerId>() {
                                                         let _ = safe_lock!(reputation_clone).report_offense(&bad_peer, NetworkOffense::InvalidHeader);

@@ -11,3 +11,6 @@ pub const MIN_RELAY_FEE_RATE: u64 = 5;
 
 // Coinbase UTXO maturity threshold.
 pub const COINBASE_MATURITY: u64 = 100;
+
+// Hard fork activation height for consensus security patch v2.3.0
+pub const CONSENSUS_HARDFORK_V2_HEIGHT: u64 = 21_500;
