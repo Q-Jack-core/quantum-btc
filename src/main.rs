@@ -445,6 +445,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let genesis_anchor_time = Arc::new(AtomicU64::new(anchor_time_val));
     let genesis_anchor_target = Arc::new(AtomicU64::new(anchor_target_val));
     
+    let next_mining_height = storage.get_chain_list().len() as u64;
+    if next_mining_height > 0 {
+        let correct_target = consensus::ConsensusEngine::required_target(
+            anchor_time_val,
+            anchor_target_val,
+            initial_block.header.timestamp,
+            next_mining_height,
+        );
+        current_target.store(correct_target, Ordering::SeqCst);
+    }
+
     let reputation = Arc::new(Mutex::new(ReputationManager::new())); 
 
     let mut sync_requested = false;
@@ -1948,7 +1959,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                     if hash_u64 <= header.target {
                                         // Restored missing guard: Ensure we do not process already known blocks.
-                                        if storage.get_block_index(&hash).is_none() {
+                                        if storage.get_block_index(&hash).map_or(true, |idx| !idx.has_data) {
                                             if storage.get_block_index(&header.previous_hash).is_some() || header.previous_hash == [0u8; 32] {
                                                 tracing::info!("[INFO] Network: Valid BlockAnnouncement received. Requesting Q-BIP-152 Compact Block...");
                                                 let req = crate::network::SyncRequest::GetCompactBlock { 
@@ -2173,10 +2184,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         if let Some(tracked_hash) = active_req_map.remove(&request_id) {
                                             in_flight_txs.remove(&tracked_hash);
                                         }
-                                        safe_lock!(reputation).reward_sync_success(&peer);
                                         // L1 V2.0 CORE: Intercept and process lightweight headers first.
                                         if let crate::network::SyncResponse::Headers { headers, responder: _ } = &response {
                                             if headers.is_empty() { continue; }
+                                            
+                                            safe_lock!(reputation).reward_sync_success(&peer);
+                                            
                                             let mut hashes_to_fetch = Vec::new();
                                             
                                             //  FIX: Ephemeral Header Cache (AR Glasses)
@@ -2195,6 +2208,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 let hash: [u8; 32] = hasher.finalize().into();
                                                 
                                                 if u64::from_be_bytes(hash[..8].try_into().unwrap()) <= header.target {
+                                                    let prev_idx_opt = storage.get_block_index(&header.previous_hash)
+                                                        .or_else(|| local_header_cache.get(&header.previous_hash).cloned());
+                                                    let incoming_height = prev_idx_opt.as_ref().map_or(0, |idx| idx.height + 1);
+                                                    let local_tip_height = storage.get_chain_list().len() as u64;
+
+                                                    if local_tip_height > 10 && incoming_height < local_tip_height.saturating_sub(10) {
+                                                        continue;
+                                                    }
+
                                                     let existing_idx = storage.get_block_index(&hash);
                                                     if existing_idx.is_none() {
                                                         // Penetrate physical bounds by probing the ephemeral overlay first.
@@ -2276,6 +2298,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                         match response {
                                             crate::network::SyncResponse::DataResponse { blocks, responder } => {
+                                                if !blocks.is_empty() {
+                                                    safe_lock!(reputation).reward_sync_success(&peer);
+                                                }
                                                 fully_assembled_blocks = blocks;
                                                 responder_str = responder;
                                             }
@@ -2975,14 +3000,19 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                 match error {
                                     libp2p::request_response::OutboundFailure::UnsupportedProtocols => {} 
                                     _ => {
-                                        if !FALLBACK_GUARD.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                                            tracing::warn!("[DEFENSE] Network failure to {} ({:?}). Amnesty granted. Guarded Fallback scheduled.", peer, error);
-                                            let sos_tx_clone = sos_tx.clone();
-                                            tokio::spawn(async move {
-                                                tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                                                let _ = sos_tx_clone.try_send((0, None));
-                                                FALLBACK_GUARD.store(false, std::sync::atomic::Ordering::SeqCst);
-                                            });
+                                        let current_chain_len = storage.get_chain_list().len() as u64;
+                                        if current_chain_len < 1000 {
+                                            if !FALLBACK_GUARD.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                                                tracing::warn!("[DEFENSE] Network failure to {} ({:?}). Amnesty granted. Guarded Fallback scheduled.", peer, error);
+                                                let sos_tx_clone = sos_tx.clone();
+                                                tokio::spawn(async move {
+                                                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
+                                                    let _ = sos_tx_clone.try_send((0, None));
+                                                    FALLBACK_GUARD.store(false, std::sync::atomic::Ordering::SeqCst);
+                                                });
+                                            }
+                                        } else {
+                                            tracing::debug!("[DEFENSE] Network failure to {} ignored to prevent Headers-Trap deadlock.", peer);
                                         }
                                     }
                                 }
