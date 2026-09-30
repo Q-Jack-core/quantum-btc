@@ -225,6 +225,10 @@ impl QuantumMempool {
         let mut block_spent_utxos = HashSet::new();
         let mut current_block_weight: u64 = 480; // Block header reserved weight (120 * 4)
         let mut current_block_sigops: usize = 0;
+        // Weight alone is not enough: ML-DSA witnesses are counted at 1 WU/byte,
+        // so MAX_BLOCK_WEIGHT admits ~31MB of them while the firewall drops any
+        // block over MAX_BLOCK_SIZE_BYTES.
+        let mut current_block_size: usize = crate::config::BLOCK_TEMPLATE_RESERVE_BYTES;
         
         let mut in_degree: HashMap<[u8; 32], usize> = HashMap::new();
 
@@ -256,10 +260,12 @@ impl QuantumMempool {
             if let Some(entry) = self.tx_pool.get(&current_hash) {
                 let tx_weight = entry.tx.get_weight();
                 let tx_sigops = entry.tx.get_sigops_count();
+                let tx_size = entry.tx.get_physical_size();
 
                 // Enforce mathematical constraints. Skip if exceeds, but keep packing smaller txs.
                 if current_block_weight + tx_weight > crate::config::MAX_BLOCK_WEIGHT as u64 
-                    || current_block_sigops + tx_sigops > crate::config::MAX_BLOCK_SIGOPS as usize {
+                    || current_block_sigops + tx_sigops > crate::config::MAX_BLOCK_SIGOPS as usize
+                    || current_block_size + tx_size > crate::config::MAX_TEMPLATE_BLOCK_BYTES {
                     continue; 
                 }
 
@@ -275,6 +281,7 @@ impl QuantumMempool {
 
                 current_block_weight += tx_weight;
                 current_block_sigops += tx_sigops;
+                current_block_size += tx_size;
                 valid_txs.push(entry.tx.clone());
                 
                 for input in &entry.tx.inputs {

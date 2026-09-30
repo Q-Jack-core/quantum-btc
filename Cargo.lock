@@ -2863,12 +2863,14 @@ name = "quantum-btc"
 version = "0.1.0"
 dependencies = [
  "aes-gcm",
+ "async-trait",
  "axum",
  "base64 0.22.1",
  "bech32",
  "bincode",
  "bip39",
  "bs58",
+ "cbor4ii",
  "cc",
  "crossbeam-channel",
  "hmac",

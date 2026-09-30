@@ -411,12 +411,22 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[INFO] System: Node online at port {}.", port);
     println!("[INFO] Commands: [wallet_gen <name>], [wallet_restore <name> <12 words>], [wallet_change_password <name>], [list_wallets], [balance <name>], [transfer <amt> <target> <name>], [mine], [auto_mine <start|stop>], [connect <ip> <port>]");
 
-    //  Recover absolute target difficulty and enforce ASERT max target boundary.
-    let tip_hash_for_target = initial_block.calculate_hash();
-    //  FIX: Extreme Target Throttling (Ice Age Lock).
-    // Compress the genesis target to force physical computation time, eliminating multi-fork anomalies.
-    // Perfectly aligns with the 1-minute block time physics.
-    let initial_target = storage.get_block_index(&tip_hash_for_target).map(|idx| idx.header.target).unwrap_or(0x0000_0000_FFFF_FFFFu64);
+    //  Cache absolute genesis constants. O(1) memory access, zero disk I/O blocking.
+    let genesis_h = storage.get_chain_list().first().copied().unwrap_or_else(|| initial_block.calculate_hash());
+    let anchor_time_val = storage.get_block_index(&genesis_h).map(|idx| idx.header.timestamp).unwrap_or(initial_block.header.timestamp);
+    let anchor_target_val = storage.get_block_index(&genesis_h).map(|idx| idx.header.target).unwrap_or(0x0000_0000_FFFF_FFFFu64);
+
+    // The miner works on tip_height + 1, so start from the same ASERT target the
+    // block validator will require for that height. Seeding with the tip's own
+    // header target made every block found after a restart fail local
+    // validation until the first network block re-derived the target.
+    let tip_height_for_target = storage.get_chain_list().len().saturating_sub(1) as u64;
+    let initial_target = consensus::ConsensusEngine::required_target(
+        anchor_time_val,
+        anchor_target_val,
+        initial_block.header.timestamp,
+        tip_height_for_target + 1,
+    );
     let current_target = Arc::new(AtomicU64::new(initial_target)); 
     let auto_mine_flag = Arc::new(AtomicBool::new(false));
     
@@ -437,11 +447,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
-    //  Cache absolute genesis constants. O(1) memory access, zero disk I/O blocking.
-    let genesis_h = storage.get_chain_list().first().copied().unwrap_or_else(|| initial_block.calculate_hash());
-    let anchor_time_val = storage.get_block_index(&genesis_h).map(|idx| idx.header.timestamp).unwrap_or(initial_block.header.timestamp);
-    let anchor_target_val = storage.get_block_index(&genesis_h).map(|idx| idx.header.target).unwrap_or(0x0000_0000_FFFF_FFFFu64);
-    
     let genesis_anchor_time = Arc::new(AtomicU64::new(anchor_time_val));
     let genesis_anchor_target = Arc::new(AtomicU64::new(anchor_target_val));
     
@@ -592,7 +597,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
             //  Genesis Block Size Limit for Quantum Era.
             //  Mathematical constraint enforcement via Block Weight and SigOps.
-            if incoming_block.get_physical_size() > 8 * 1024 * 1024
+            if incoming_block.get_physical_size() > quantum_btc::config::MAX_BLOCK_SIZE_BYTES
                 || incoming_block.get_block_weight() > quantum_btc::config::MAX_BLOCK_WEIGHT as u64 
                 || incoming_block.get_block_sigops() > quantum_btc::config::MAX_BLOCK_SIGOPS as usize {
                 tracing::error!("[ERROR] Firewall: Block exceeds 8MB quantum limit, weight, or SigOps limit. Payload dropped.");
@@ -600,6 +605,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     if safe_lock!(reputation_worker).report_offense(&sender_worker, NetworkOffense::MalformedData) {
                         let _ = swarm_cmd_tx_worker.try_send(SwarmCommand::BanAndDisconnect(sender_worker)); 
                     }
+                } else {
+                    // Our own block was dropped: wake the miner or it idles until a peer's block arrives.
+                    engine_idle_notify_worker.notify_waiters();
                 }
                 continue;
             }
@@ -1449,8 +1457,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 //  Expand local wallet assembly line capacity with strict safety margins.
                                                 // Increased to 8MB to allow Whale TXs (e.g., 2000+ UTXOs at ~7MB).
                                                 // STRICTLY kept under the 16MB P2P network limit to prevent Block Overflow.
-                                                if projected_bytes > 8_000_000 {
-                                                    _utxo_query_result = Err("Transaction exceeds 8MB physical limit");
+                                                if projected_bytes > quantum_btc::config::MAX_WALLET_TX_BYTES {
+                                                    _utxo_query_result = Err("Transaction too large to relay; send a smaller amount (fewer inputs)");
                                                     break;
                                                 }
                                                 
@@ -2607,7 +2615,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     return None;
                                                 }
 
-                                                if b.get_physical_size() > 8 * 1024 * 1024
+                                                if b.get_physical_size() > quantum_btc::config::MAX_BLOCK_SIZE_BYTES
                                                     || b.get_block_weight() > quantum_btc::config::MAX_BLOCK_WEIGHT as u64 
                                                     || b.get_block_sigops() > quantum_btc::config::MAX_BLOCK_SIGOPS as usize {
                                                     tracing::error!("[ERROR] Firewall: Deep Sync block exceeds limits.");
@@ -2988,7 +2996,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             //  Precise timeout failure rollback to prevent Cache Flush Exploits.
                             libp2p::request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
-                                tracing::debug!("[DEBUG] Network: ReqResp outbound failure to {}: {:?}. Releasing tracker lock.", peer, error);
+                                tracing::warn!("[WARN] Network: ReqResp outbound failure to {}: {:?}. Releasing tracker lock.", peer, error);
                                 if let Some(failed_hash) = active_req_map.remove(&request_id) {
                                     in_flight_txs.remove(&failed_hash);
                                     // Retain in queue to naturally age out, allowing immediate retry for this specific transaction.

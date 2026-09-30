@@ -213,7 +213,9 @@ async fn get_node_info(State(state): State<RpcState>) -> Json<NodeInfoResponse> 
 
 async fn get_tactical_balance(State(state): State<RpcState>, Json(req): Json<BalanceRequest>) -> Json<BalanceResponse> {
     let current_height = state.storage.get_chain_list().len() as u64;
-    let pending_txs: Vec<Transaction> = state.mempool.lock().unwrap().get_txs_for_mining();
+    // Every mempool tx, not just the ones that fit the next block template:
+    // a queued tx's inputs are already spent as far as this wallet is concerned.
+    let pending_txs: Vec<Transaction> = state.mempool.lock().unwrap().tx_pool.values().map(|e| e.tx.clone()).collect();
 
     let mut target_hash = [0u8; 32];
     let mut is_valid_target = false;
@@ -304,7 +306,9 @@ async fn execute_transfer(State(state): State<RpcState>, Json(req): Json<Transfe
     let mut root_h = Sha256::new(); root_h.update(&my_wallet.public_key);
     let my_pk_hash: [u8; 32] = root_h.finalize().into();
 
-    let pending_txs: Vec<Transaction> = state.mempool.lock().unwrap().get_txs_for_mining();
+    // Every mempool tx, not just the ones that fit the next block template:
+    // a queued tx's inputs are already spent as far as this wallet is concerned.
+    let pending_txs: Vec<Transaction> = state.mempool.lock().unwrap().tx_pool.values().map(|e| e.tx.clone()).collect();
     
     let network_fee_rate: u64 = crate::config::MIN_RELAY_FEE_RATE * 5;
     const TX_BASE_BYTES: u64 = 30;
@@ -331,8 +335,8 @@ async fn execute_transfer(State(state): State<RpcState>, Json(req): Json<Transfe
                 let input_count = selected.len() as u64;
                 let projected_bytes = TX_BASE_BYTES + (input_count * TX_IN_BYTES) + (2 * TX_OUT_BYTES);
                 
-                if projected_bytes > 8_000_000 {
-                    _utxo_query_result = Err("Transaction exceeds 8MB physical limit");
+                if projected_bytes > crate::config::MAX_WALLET_TX_BYTES {
+                    _utxo_query_result = Err("Transaction too large to relay; send a smaller amount (fewer inputs)");
                     break;
                 }
                 
