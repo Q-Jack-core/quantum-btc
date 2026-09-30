@@ -19,7 +19,7 @@ pub struct QbtcBehaviour {
     
     // Request-Response protocol for direct block synchronization.
     // Separates bulk historical syncing from real-time gossip broadcasts.
-    pub req_resp: request_response::cbor::Behaviour<crate::network::SyncRequest, crate::network::SyncResponse>,
+    pub req_resp: request_response::Behaviour<crate::network::wide_cbor::Codec<crate::network::SyncRequest, crate::network::SyncResponse>>,
 
     // Native Ping heartbeat to teardown dead Yamux streams.
     pub ping: libp2p::ping::Behaviour,
@@ -98,7 +98,8 @@ pub fn build_swarm(storage_path: &str, is_seed_node: bool) -> Result<libp2p::Swa
         .with_request_timeout(Duration::from_secs(120));
         
     // Initialize standard request-response protocol for block and mempool synchronization.
-    let req_resp = request_response::cbor::Behaviour::<crate::network::SyncRequest, crate::network::SyncResponse>::new(
+    let req_resp = request_response::Behaviour::with_codec(
+        crate::network::wide_cbor::Codec::default(),
         [(StreamProtocol::new("/qbtc/sync/2.0.0"), request_response::ProtocolSupport::Full)],
         req_resp_config,
     );
