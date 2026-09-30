@@ -94,13 +94,41 @@ impl QuantumStorage {
 
         // L1 V2.0 CORE: Dynamically reconstruct active_chain from map_block_index.
         // Bypasses physical CHAIN_LIST array to guarantee topological consistency based on chain_work.
+        // Only tips whose whole ancestry has block data stored are eligible:
+        // a heavier headers-only branch cannot be validated or mined on until
+        // its bodies arrive, and selecting it left the node locked in IBD.
+        // Headers-first sync still pursues it via HEADER_CHAIN_LIST.
+        let mut fully_stored: HashMap<[u8; 32], bool> = HashMap::new();
+        for start in map_index.keys() {
+            let mut path = Vec::new();
+            let mut cur = *start;
+            let verdict = loop {
+                if let Some(&known) = fully_stored.get(&cur) { break known; }
+                match map_index.get(&cur) {
+                    None => break false,
+                    Some(idx) if !idx.has_data => break false,
+                    Some(idx) => {
+                        path.push(cur);
+                        if idx.header.previous_hash == [0u8; 32] { break true; }
+                        cur = idx.header.previous_hash;
+                    }
+                }
+            };
+            for h in path { fully_stored.insert(h, verdict); }
+        }
+
         let mut best_tip = [0u8; 32];
         let mut max_work = 0u128;
+        let mut max_header_work = 0u128;
         for (hash, index) in &map_index {
-            if index.chain_work > max_work {
+            max_header_work = max_header_work.max(index.chain_work);
+            if index.chain_work > max_work && fully_stored.get(hash).copied().unwrap_or(false) {
                 max_work = index.chain_work;
                 best_tip = *hash;
             }
+        }
+        if max_header_work > max_work {
+            println!("[WARN] Storage: A heavier branch is known by headers only. Following the best fully stored chain until its blocks arrive.");
         }
 
         let mut dynamic_chain = Vec::new();
