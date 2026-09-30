@@ -141,9 +141,9 @@ pub fn build_swarm(storage_path: &str, is_seed_node: bool) -> Result<libp2p::Swa
             || {
                 let mut cfg = yamux::Config::default();
                 #[allow(deprecated)]
-                cfg.set_max_buffer_size(8 * 1024 * 1024);
+                cfg.set_max_buffer_size(16 * 1024 * 1024);
                 #[allow(deprecated)]
-                cfg.set_receive_window_size(8 * 1024 * 1024);
+                cfg.set_receive_window_size(16 * 1024 * 1024);
                 cfg
             }
         )?

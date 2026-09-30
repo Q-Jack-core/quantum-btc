@@ -1839,11 +1839,23 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             
                             //  Eliminate Height Blind Spot on reconnect.
                             // Proactively broadcast our current chain tip to the newly connected peer.
-                            let local_tip_hash = safe_lock!(latest_block).calculate_hash();
+                            let mut locator_hashes = Vec::new();
+                            let chain = storage.get_chain_list();
+                            let mut step = 1;
+                            let mut index = chain.len() as i32 - 1;
+                            while index >= 0 {
+                                locator_hashes.push(chain[index as usize]);
+                                if locator_hashes.len() > 10 { step *= 2; }
+                                index -= step;
+                            }
+                            if index < 0 && !chain.is_empty() && locator_hashes.last() != Some(&chain[0]) {
+                                locator_hashes.push(chain[0]);
+                            }
+
                             let _ = swarm.behaviour_mut().req_resp.send_request(
                                 &peer_id, 
                                 crate::network::SyncRequest::GetHeaders {
-                                    locator_hashes: vec![local_tip_hash],
+                                    locator_hashes,
                                     requester: local_peer_id.to_string(),
                                 }
                             );
@@ -2035,8 +2047,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 continue;
                                             }
                                             crate::network::SyncRequest::GetData { hashes, mode, .. } => {
-                                                //  Atomic IO Guard limit checking (Max 5 concurrent).
-                                                let io_guard = match IoTaskGuard::try_acquire(5) {
+                                                //  Atomic IO Guard limit checking (Max 25 concurrent).
+                                                let io_guard = match IoTaskGuard::try_acquire(25) {
                                                     Some(guard) => guard,
                                                     None => {
                                                         tracing::warn!("[WARN] Node IO saturated. Dropping GetData request to protect memory.");
@@ -2221,7 +2233,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     let incoming_height = prev_idx_opt.as_ref().map_or(0, |idx| idx.height + 1);
                                                     let local_tip_height = storage.get_chain_list().len() as u64;
 
-                                                    if local_tip_height > 10 && incoming_height < local_tip_height.saturating_sub(10) {
+                                                    if incoming_height > 0 && incoming_height < local_tip_height.saturating_sub(MAX_REORG_DEPTH) {
                                                         continue;
                                                     }
 
@@ -2556,9 +2568,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 } else if let Some(idx) = storage_clone.get_block_index(&b.header.previous_hash).or_else(|| local_block_cache.get(&b.header.previous_hash).cloned()) {
                                                     idx.height + 1
                                                 } else {
-                                                    // DEFENSE: Orphan block detected in Deep Sync batch.
-                                                    // Skip specific block without dropping the valid batch to tolerate P2P jitter.
-                                                    tracing::warn!("[WARN] Sync: Orphan block detected. Skipping specific block.");
+                                                    tracing::warn!("[WARN] Sync: Orphan block detected in direct pipeline. Quarantining to Orphan Pool.");
+                                                    let _ = storage_clone.add_orphan_block(b.clone());
                                                     continue; 
                                                 };
 
@@ -2819,8 +2830,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                                         current_batch_size = 0;
                                                                     }
                                                                     
-                                                                    *current_latest = b_apply.clone();
-                                                                    safe_lock!(mempool_clone).atomic_sweep(&b_apply.transactions);
+                                                                    
                                                                     
                                                                     if apply_h % 5 == 0 || apply_h == 1 {
                                                                         tracing::info!("[INFO] True Sync: Cryptographically verified and committed Block Height {}", apply_h);
@@ -2858,6 +2868,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         let _ = utxo_tx_worker_clone.blocking_send(utxo::UtxoCommand::GetSnapshot { resp: snap_tx });
                                                         let utxo_snap = snap_rx.blocking_recv().unwrap();
                                                         storage_clone.commit_state_batch(batch_instructions, &utxo_snap);
+                                                        
+                                                        if let Some(final_hash) = connect_path.last() {
+                                                            if let Some(final_block) = storage_clone.get_block_by_hash(final_hash, false) {
+                                                                *current_latest = final_block;
+                                                            }
+                                                        }
                                                     } else {
                                                         storage_clone.purge_staged_data();
                                                     }
