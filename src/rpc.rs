@@ -21,6 +21,15 @@ use crate::network::NetworkPayload;
 use crate::transaction::{Transaction, TxIn, TxOut, TxWitness};
 use sha2::{Digest, Sha256};
 
+// Transfer sizing (ML-DSA-65 witnesses make each input ~5.3KB).
+const TX_BASE_BYTES: u64 = 30;
+const TX_IN_BYTES: u64 = 5350;
+const TX_OUT_BYTES: u64 = 50;
+
+fn transfer_fee(input_count: u64) -> u64 {
+    (TX_BASE_BYTES + input_count * TX_IN_BYTES + 2 * TX_OUT_BYTES) * crate::config::MIN_RELAY_FEE_RATE * 5
+}
+
 #[derive(Clone)]
 pub struct RpcState {
     pub port: u16, 
@@ -62,6 +71,11 @@ pub struct BalanceResponse {
     pub unconfirmed_sats: u64, 
     pub pending_sats: u64,     
     pub locked_sats: u64,      
+    pub spendable_utxos: u64,
+    /// Largest amount a single transfer can send after its own fee.
+    pub max_send_sats: u64,
+    pub max_send_fee_sats: u64,
+    pub max_send_inputs: u64,
 }
 
 #[derive(Deserialize)]
@@ -234,7 +248,11 @@ async fn get_tactical_balance(State(state): State<RpcState>, Json(req): Json<Bal
             confirmed_sats: 0, 
             unconfirmed_sats: 0,
             pending_sats: 0,      // Added missing field to satisfy Rust compiler
-            locked_sats: 0        // Added missing field to satisfy Rust compiler
+            locked_sats: 0,  // Added missing field to satisfy Rust compiler
+            spendable_utxos: 0,
+            max_send_sats: 0,
+            max_send_fee_sats: 0,
+            max_send_inputs: 0,
         });
     }
 
@@ -242,12 +260,45 @@ async fn get_tactical_balance(State(state): State<RpcState>, Json(req): Json<Bal
     let _ = state.utxo_tx.send(crate::utxo::UtxoCommand::GetBalance { 
         pubkey_hash: target_hash, 
         current_height, 
-        pending_txs,
+        pending_txs: pending_txs.clone(),
         resp: resp_tx 
     }).await;
     
     // FIX: Removed the underscore from '_pending_sats' to actively receive the mempool pending balance.
     let (mature_sats, pending_sats, locked_sats) = resp_rx.await.unwrap_or((0, 0, 0));
+
+    // Mirror execute_transfer's largest-first selection: asking for the whole
+    // mature balance returns every spendable UTXO in that order. The best
+    // prefix is the one maximizing value minus fee (skips inputs worth less
+    // than their own fee), capped by the wallet transaction size limit.
+    let mut spendable_utxos = 0u64;
+    let mut max_send_sats = 0u64;
+    let mut max_send_fee_sats = 0u64;
+    let mut max_send_inputs = 0u64;
+    if mature_sats > 0 {
+        let (sp_tx, sp_rx) = tokio::sync::oneshot::channel();
+        let _ = state.utxo_tx.send(crate::utxo::UtxoCommand::GetSpendable {
+            pubkey_hash: target_hash,
+            current_height,
+            required_amount: mature_sats,
+            pending_txs,
+            resp: sp_tx,
+        }).await;
+        if let Ok(Ok((selected, _))) = sp_rx.await {
+            spendable_utxos = selected.len() as u64;
+            let max_inputs = (crate::config::MAX_WALLET_TX_BYTES - TX_BASE_BYTES - 2 * TX_OUT_BYTES) / TX_IN_BYTES;
+            let mut sum = 0u64;
+            for (k, (_, record)) in selected.iter().enumerate().take(max_inputs as usize) {
+                sum += record.output.value;
+                let fee = transfer_fee(k as u64 + 1);
+                if sum > fee && sum - fee > max_send_sats {
+                    max_send_sats = sum - fee;
+                    max_send_fee_sats = fee;
+                    max_send_inputs = k as u64 + 1;
+                }
+            }
+        }
+    }
 
     // FIX: Strictly decouple pending and locked states for accurate frontend display.
     Json(BalanceResponse { 
@@ -256,6 +307,10 @@ async fn get_tactical_balance(State(state): State<RpcState>, Json(req): Json<Bal
         unconfirmed_sats: pending_sats + locked_sats, // Fallback
         pending_sats: pending_sats,
         locked_sats: locked_sats,
+        spendable_utxos,
+        max_send_sats,
+        max_send_fee_sats,
+        max_send_inputs,
     })
 }
 
@@ -310,12 +365,7 @@ async fn execute_transfer(State(state): State<RpcState>, Json(req): Json<Transfe
     // a queued tx's inputs are already spent as far as this wallet is concerned.
     let pending_txs: Vec<Transaction> = state.mempool.lock().unwrap().tx_pool.values().map(|e| e.tx.clone()).collect();
     
-    let network_fee_rate: u64 = crate::config::MIN_RELAY_FEE_RATE * 5;
-    const TX_BASE_BYTES: u64 = 30;
-    const TX_IN_BYTES: u64 = 5350;
-    const TX_OUT_BYTES: u64 = 50;
-
-    let mut target_fee_atomic: u64 = (TX_BASE_BYTES + TX_IN_BYTES + (2 * TX_OUT_BYTES)) * network_fee_rate;
+    let mut target_fee_atomic: u64 = transfer_fee(1);
     let mut _utxo_query_result = Err("Insufficient deep liquidity to cover transaction.");
 
     for _iteration in 0..5 {
@@ -340,7 +390,7 @@ async fn execute_transfer(State(state): State<RpcState>, Json(req): Json<Transfe
                     break;
                 }
                 
-                let projected_fee = projected_bytes * network_fee_rate;
+                let projected_fee = transfer_fee(input_count);
                 
                 if gathered >= amount_atomic + projected_fee {
                     target_fee_atomic = projected_fee;
