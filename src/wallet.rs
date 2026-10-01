@@ -70,8 +70,13 @@ impl QuantumWallet {
                 }
                 
                 // 3. Convert 5-bit words back to 8-bit bytes.
+                // Addresses carry exactly one 32-byte pubkey hash; anything else
+                // would either panic callers that slice [0..32] or alias another
+                // address that shares the same first 32 bytes.
                 if let Ok(hash_bytes) = Vec::<u8>::from_base32(&base32_data) {
-                    return Some(hash_bytes);
+                    if hash_bytes.len() == 32 {
+                        return Some(hash_bytes);
+                    }
                 }
                 None
             }
@@ -242,5 +247,21 @@ impl QuantumWallet {
         
         tracing::debug!("[DEBUG] Wallet: ML-DSA-65 signature generated successfully.");
         signature
+    }
+}
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    #[test]
+    fn decode_accepts_only_32_byte_payloads() {
+        let ok = QuantumWallet::encode_qbtc_address(&[7u8; 32]);
+        assert_eq!(QuantumWallet::decode_qbtc_address(&ok).map(|v| v.len()), Some(32));
+
+        let short = QuantumWallet::encode_qbtc_address(&[7u8; 20]);
+        assert!(QuantumWallet::decode_qbtc_address(&short).is_none());
+
+        let long = QuantumWallet::encode_qbtc_address(&[7u8; 40]);
+        assert!(QuantumWallet::decode_qbtc_address(&long).is_none());
     }
 }

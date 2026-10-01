@@ -53,8 +53,17 @@ impl ReputationManager {
         if self.profiles.len() <= MAX_PROFILES {
             return;
         }
-        // Immunity rule: Retain nodes with good standing. Purge untrusted cache.
-        self.profiles.retain(|_, profile| profile.score >= INITIAL_TRUST);
+        // Keep peers in good standing and peers that are still banned; dropping
+        // a ban record would let that peer straight back in. Neutral and
+        // penalized-but-not-banned profiles go first.
+        self.profiles.retain(|_, profile| profile.score >= INITIAL_TRUST || profile.score <= BAN_THRESHOLD);
+        if self.profiles.len() > MAX_PROFILES {
+            // Still full (e.g. mostly bans): drop bans that have already expired.
+            let now = Self::current_time();
+            self.profiles.retain(|_, profile| {
+                profile.score > BAN_THRESHOLD || now.saturating_sub(profile.last_active) < 7200
+            });
+        }
     }
 
     /// Retrieves or initializes a profile, updating the activity timestamp.
@@ -145,5 +154,23 @@ impl ReputationManager {
 
     pub fn get_score(&mut self, peer_id: &PeerId) -> i32 {
         self.update_activity(peer_id).score
+    }
+}
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    #[test]
+    fn ban_survives_profile_table_overflow() {
+        let mut rm = ReputationManager::new();
+        let bad = PeerId::random();
+        assert!(rm.report_offense(&bad, NetworkOffense::InvalidSignature), "one invalid sig bans");
+        assert!(!rm.is_trusted(&bad));
+
+        for _ in 0..(MAX_PROFILES + 100) {
+            rm.is_trusted(&PeerId::random());
+        }
+
+        assert!(!rm.is_trusted(&bad), "ban record must not be dropped when the table overflows");
     }
 }

@@ -164,14 +164,17 @@ impl Block {
 
     // Initializes a new block template.
     pub fn new(previous_hash: [u8; 32], transactions: Vec<Transaction>, target: u64, nonce: u64) -> Self {
+        // CVE-2012-2459: a block must not repeat a txid. Drop later duplicates
+        // instead of panicking, so a bad template can't take the node down.
+        let mut seen = std::collections::HashSet::new();
+        let transactions: Vec<Transaction> = transactions
+            .into_iter()
+            .filter(|tx| seen.insert(tx.calculate_id()))
+            .collect();
+
         // Extract transaction IDs (Magazine 1) and Witness hashes (Magazine 2).
         let tx_ids: Vec<[u8; 32]> = transactions.iter().map(|tx| tx.calculate_id()).collect();
         let witness_hashes: Vec<[u8; 32]> = transactions.iter().map(|tx| tx.calculate_witness_hash()).collect();
-
-        // Enforce CVE-2012-2459 mitigation at the consensus constructor level.
-        if crate::crypto::merkle::has_duplicate_txs(&tx_ids) {
-            panic!("Consensus failure: Duplicate transactions detected in block construction.");
-        }
 
         let merkle_root = crate::crypto::merkle::build_merkle_root(tx_ids);
         let commit_merkle_root = crate::crypto::merkle::build_merkle_root(witness_hashes);
@@ -216,3 +219,20 @@ impl Block {
 }
 
 
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+    use crate::transaction::{TxIn, TxOut};
+
+    #[test]
+    fn template_with_duplicate_tx_does_not_panic() {
+        let tx = Transaction {
+            inputs: vec![TxIn { previous_output_hash: [3u8; 32], vout: 0 }],
+            outputs: vec![TxOut { value: 1, public_key_hash: [4u8; 32], recovery: None }],
+            witnesses: vec![],
+        };
+        let block = Block::new([0u8; 32], vec![tx.clone(), tx.clone(), tx], 1, 0);
+        assert_eq!(block.transactions.len(), 1);
+    }
+}

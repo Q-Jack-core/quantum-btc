@@ -209,11 +209,17 @@ impl QuantumStorage {
         let mut node_b = get_idx(hash_b)?;
 
         // Step 1: Height alignment. Retreat the higher node until heights match.
+        // A parent must always be lower than its child; anything else is a
+        // corrupted index and would otherwise loop forever.
         while node_a.height > node_b.height {
-            node_a = get_idx(&node_a.header.previous_hash)?;
+            let prev = get_idx(&node_a.header.previous_hash)?;
+            if prev.height >= node_a.height { return None; }
+            node_a = prev;
         }
         while node_b.height > node_a.height {
-            node_b = get_idx(&node_b.header.previous_hash)?;
+            let prev = get_idx(&node_b.header.previous_hash)?;
+            if prev.height >= node_b.height { return None; }
+            node_b = prev;
         }
 
         // Step 2: Synchronous traversal backward until hashes converge.
@@ -961,5 +967,31 @@ impl QuantumStorage {
     pub fn flush(&self) {
         let _ = self.db.flush();
         println!("[INFO] Storage: RocksDB memory tables flushed to disk.");
+    }
+}
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    fn idx(hash: u8, prev: [u8; 32], height: u64) -> BlockIndex {
+        BlockIndex {
+            block_hash: [hash; 32],
+            header: BlockHeader { timestamp: 0, previous_hash: prev, merkle_root: [0; 32], commit_merkle_root: [0; 32], nonce: 0, target: 1 },
+            height,
+            chain_work: height as u128,
+            has_data: false,
+        }
+    }
+
+    #[test]
+    fn fork_lca_returns_none_on_corrupted_parent_heights() {
+        let dir = tempfile::tempdir().unwrap();
+        let storage = QuantumStorage::new(dir.path());
+        let mut overlay = HashMap::new();
+        // a (h=5) -> p (h=7, corrupt) -> a ... ; b (h=1) is unrelated.
+        overlay.insert([0xA; 32], idx(0xA, [0xC; 32], 5));
+        overlay.insert([0xC; 32], idx(0xC, [0xA; 32], 7));
+        overlay.insert([0xB; 32], idx(0xB, [0u8; 32], 1));
+        assert_eq!(storage.find_fork_lca(&[0xA; 32], &[0xB; 32], &overlay), None);
     }
 }
