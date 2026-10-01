@@ -1174,13 +1174,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     let phrase = mnemonic.to_string();
                     
                     if let Ok(new_wallet) = wallet::QuantumWallet::restore_from_mnemonic(&phrase) {
-                        if new_wallet.save_to_disk_secure(&cli_datadir, wallet_name, &password).is_ok() {
-                            println!("[INFO] Wallet: Keypair generated. Alias: '{}' | Address: {}", wallet_name, new_wallet.qbtc_address);
-                            println!("[INFO] Wallet: Mnemonic: {}", phrase);
-                            println!("[WARN] Wallet: Please store the mnemonic safely in an air-gapped location.");
-                            println!("[INFO] Wallet: Keystore AES-256-GCM encrypted and secured.");
-                        } else {
-                            println!("[ERROR] Wallet: Failed to flush keystore to disk.");
+                        match new_wallet.create_on_disk_secure(&cli_datadir, wallet_name, &password) {
+                            Ok(()) => {
+                                println!("[INFO] Wallet: Keypair generated. Alias: '{}' | Address: {}", wallet_name, new_wallet.qbtc_address);
+                                println!("[INFO] Wallet: Mnemonic: {}", phrase);
+                                println!("[WARN] Wallet: Please store the mnemonic safely in an air-gapped location.");
+                                println!("[INFO] Wallet: Keystore AES-256-GCM encrypted and secured.");
+                            }
+                            Err(e) => println!("[ERROR] Wallet: {}", e),
                         }
                     }
                 }
@@ -1228,11 +1229,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                     match wallet::QuantumWallet::restore_from_mnemonic(&phrase) {
                         Ok(recovered_wallet) => {
-                            if recovered_wallet.save_to_disk_secure(&cli_datadir, wallet_name, &password).is_ok() {
-                                println!("[INFO] Wallet: Successfully restored from mnemonic.");
-                                println!("[INFO] Wallet: Alias: '{}' | Address: {}", wallet_name, recovered_wallet.qbtc_address);
-                            } else {
-                                println!("[ERROR] Wallet: Failed to secure recovered keystore to disk.");
+                            match recovered_wallet.create_on_disk_secure(&cli_datadir, wallet_name, &password) {
+                                Ok(()) => {
+                                    println!("[INFO] Wallet: Successfully restored from mnemonic.");
+                                    println!("[INFO] Wallet: Alias: '{}' | Address: {}", wallet_name, recovered_wallet.qbtc_address);
+                                }
+                                Err(e) => println!("[ERROR] Wallet: {}", e),
                             }
                         }
                         Err(e) => println!("[ERROR] Wallet: Restore failed: {}", e),
