@@ -104,6 +104,9 @@ impl QuantumStorage {
             let mut cur = *start;
             let verdict = loop {
                 if let Some(&known) = fully_stored.get(&cur) { break known; }
+                // A corrupted index could contain a parent cycle; no real
+                // ancestry is longer than the index itself.
+                if path.len() > map_index.len() { break false; }
                 match map_index.get(&cur) {
                     None => break false,
                     Some(idx) if !idx.has_data => break false,
