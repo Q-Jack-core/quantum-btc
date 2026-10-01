@@ -215,7 +215,7 @@ async fn api_wallet_restore(State(state): State<RpcState>, Json(req): Json<Walle
 }
 
 async fn get_node_info(State(state): State<RpcState>) -> Json<NodeInfoResponse> {
-    let mp = state.mempool.lock().unwrap();
+    let mp = state.mempool.lock().unwrap_or_else(|e| e.into_inner());
     // Fetch physical chain length from storage instead of unix timestamp.
     let physical_height = state.storage.get_chain_list().len().saturating_sub(1) as u64;
     Json(NodeInfoResponse {
@@ -229,7 +229,7 @@ async fn get_tactical_balance(State(state): State<RpcState>, Json(req): Json<Bal
     let current_height = state.storage.get_chain_list().len() as u64;
     // Every mempool tx, not just the ones that fit the next block template:
     // a queued tx's inputs are already spent as far as this wallet is concerned.
-    let pending_txs: Vec<Transaction> = state.mempool.lock().unwrap().tx_pool.values().map(|e| e.tx.clone()).collect();
+    let pending_txs: Vec<Transaction> = state.mempool.lock().unwrap_or_else(|e| e.into_inner()).tx_pool.values().map(|e| e.tx.clone()).collect();
 
     let mut target_hash = [0u8; 32];
     let mut is_valid_target = false;
@@ -363,7 +363,7 @@ async fn execute_transfer(State(state): State<RpcState>, Json(req): Json<Transfe
 
     // Every mempool tx, not just the ones that fit the next block template:
     // a queued tx's inputs are already spent as far as this wallet is concerned.
-    let pending_txs: Vec<Transaction> = state.mempool.lock().unwrap().tx_pool.values().map(|e| e.tx.clone()).collect();
+    let pending_txs: Vec<Transaction> = state.mempool.lock().unwrap_or_else(|e| e.into_inner()).tx_pool.values().map(|e| e.tx.clone()).collect();
     
     let mut target_fee_atomic: u64 = transfer_fee(1);
     let mut _utxo_query_result = Err("Insufficient deep liquidity to cover transaction.");
@@ -450,7 +450,7 @@ async fn execute_transfer(State(state): State<RpcState>, Json(req): Json<Transfe
                         return Json(ApiResponse { success: false, message: "Fee too low.".to_string(), tx_hash: None });
                     }
                     
-                    let admission_result = state.mempool.lock().unwrap().add_transaction(tx.clone(), exact_fee);
+                    let admission_result = state.mempool.lock().unwrap_or_else(|e| e.into_inner()).add_transaction(tx.clone(), exact_fee);
                     
                     if admission_result.is_ok() {
                         let _ = state.p2p_tx.send(NetworkPayload::TransactionInv(tx.calculate_id())).await;
@@ -475,7 +475,7 @@ async fn get_tx_status(State(state): State<RpcState>, Json(req): Json<TxStatusRe
         for i in 0..32 { hash_bytes[i] = u8::from_str_radix(&req.tx_hash[i*2..i*2+2], 16).unwrap_or(0); }
     } else { return Json(TxStatusResponse { status: "INVALID_HASH".to_string() }); }
 
-    let mp = state.mempool.lock().unwrap();
+    let mp = state.mempool.lock().unwrap_or_else(|e| e.into_inner());
     if mp.tx_pool.contains_key(&hash_bytes) { return Json(TxStatusResponse { status: "PENDING".to_string() }); }
     Json(TxStatusResponse { status: "UNKNOWN_OR_MINED".to_string() })
 }
@@ -643,7 +643,7 @@ async fn api_get_block_template(State(state): State<RpcState>, Json(req): Json<G
 
     let mut total_fees = 0u64;
     let mut txs = {
-        let mempool_guard = state.mempool.lock().unwrap();
+        let mempool_guard = state.mempool.lock().unwrap_or_else(|e| e.into_inner());
         let selected = mempool_guard.get_txs_for_mining();
         for tx in &selected {
             let tx_hash = tx.calculate_id();
@@ -679,7 +679,7 @@ async fn api_submit_block(State(state): State<RpcState>, Json(req): Json<SubmitB
     let hash = block.calculate_hash();
 
     // 1. Tip validation to prevent stale submissions.
-    let tip_hash = state.latest_block.lock().unwrap().calculate_hash();
+    let tip_hash = state.latest_block.lock().unwrap_or_else(|e| e.into_inner()).calculate_hash();
     if block.header.previous_hash != tip_hash {
         return Json(ApiResponse { success: false, message: "Rejected: Orphan block or invalid tip".to_string(), tx_hash: None });
     }
@@ -738,8 +738,8 @@ async fn api_submit_block(State(state): State<RpcState>, Json(req): Json<SubmitB
             state.storage.commit_state_transition(block.clone(), current_height, &undo_log, &utxo_snap, new_work);
 
             // 5. Memory Pointer Updates.
-            *state.latest_block.lock().unwrap() = block.clone();
-            state.mempool.lock().unwrap().atomic_sweep(&block.transactions);
+            *state.latest_block.lock().unwrap_or_else(|e| e.into_inner()) = block.clone();
+            state.mempool.lock().unwrap_or_else(|e| e.into_inner()).atomic_sweep(&block.transactions);
 
             // 6. Network Broadcast via Gossipsub.
             let _ = state.p2p_tx.send(NetworkPayload::BlockAnnouncement(block.header.clone())).await;

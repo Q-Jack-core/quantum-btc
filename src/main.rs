@@ -2170,9 +2170,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         }.or_else(|| storage_clone.get_block_by_hash(&block_hash, false));
 
                                                         if let Some(block) = fetched_block {
+                                                            // Each requested index is served at most once, so a
+                                                            // request can never return more than the block itself.
                                                             let mut missing_txs = Vec::new();
+                                                            let mut served = std::collections::HashSet::new();
                                                             for idx in indexes {
-                                                                if idx < block.transactions.len() {
+                                                                if idx < block.transactions.len() && served.insert(idx) {
                                                                     missing_txs.push(block.transactions[idx].clone());
                                                                 }
                                                             }
@@ -2713,9 +2716,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     let mut curr = incoming_tip;
                                                     while curr != lca_hash && curr != [0u8; 32] {
                                                         connect_path.push(curr);
-                                                        let idx = storage_clone.get_block_index(&curr)
-                                                            .or_else(|| local_block_cache.get(&curr).cloned())
-                                                            .expect("Fatal: Broken chain sequence during path reconstruction");
+                                                        let idx = match storage_clone.get_block_index(&curr)
+                                                            .or_else(|| local_block_cache.get(&curr).cloned()) {
+                                                            Some(idx) => idx,
+                                                            None => {
+                                                                // Inconsistent index: drop this batch instead of killing the sync worker.
+                                                                tracing::warn!("[WARN] Consensus: Broken chain sequence during path reconstruction. Batch discarded.");
+                                                                return None;
+                                                            }
+                                                        };
                                                         curr = idx.header.previous_hash;
                                                     }
                                                     connect_path.reverse();

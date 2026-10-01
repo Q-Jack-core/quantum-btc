@@ -232,6 +232,12 @@ impl UtxoState {
             return Err("Layer-2 verification requires upgraded node implementation.");
         }
 
+        // Relay policy (mempool only): exactly one witness per input. Extra
+        // witnesses are dead weight that nothing verifies.
+        if !tx.is_well_formed() {
+            return Err("Policy: transaction must have exactly one witness per input.");
+        }
+
         //  Dust Limit check completely stripped from Consensus Rule.
         // Relocated to network Relay Policy to prevent Hard Forks.
 
@@ -631,3 +637,42 @@ impl UtxoActor {
 
 
 
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+    use crate::transaction::{TxIn, TxOut, TxWitness};
+
+    fn state_with_utxo(op: OutPoint) -> UtxoState {
+        let mut s = UtxoState::new();
+        s.unspent_outputs.insert(op, UtxoRecord {
+            output: TxOut { value: 1_000, public_key_hash: [9u8; 32], recovery: None },
+            height: 1,
+            is_coinbase: false,
+        });
+        s
+    }
+
+    #[test]
+    fn mempool_policy_requires_one_witness_per_input() {
+        let op = OutPoint { tx_hash: [5u8; 32], vout: 0 };
+        let state = state_with_utxo(op.clone());
+        let w = || TxWitness { signature: vec![0u8; 16], public_key: vec![0u8; 16] };
+        let base = Transaction {
+            inputs: vec![TxIn { previous_output_hash: op.tx_hash, vout: op.vout }],
+            outputs: vec![TxOut { value: 500, public_key_hash: [1u8; 32], recovery: None }],
+            witnesses: vec![],
+        };
+
+        let mut extra = base.clone();
+        extra.witnesses = vec![w(), w()];
+        let err = state.validate_transaction(&extra, 1_000, false).unwrap_err();
+        assert!(err.contains("one witness per input"), "got: {err}");
+
+        // Correct count passes this check and fails later on the (fake) signature instead.
+        let mut one = base.clone();
+        one.witnesses = vec![w()];
+        let err = state.validate_transaction(&one, 1_000, false).unwrap_err();
+        assert!(!err.contains("one witness per input"), "got: {err}");
+    }
+}

@@ -110,7 +110,15 @@ impl SyncDebouncer {
 
     /// Line of Defense 1 & 2: Hash-level Debounce Lock + TTL Forced Eviction.
     /// Returns true to allow request; false to intercept duplicate request.
+    // Bounds for the tracking maps; expired entries are dropped once exceeded.
+    const MAX_IN_FLIGHT: usize = 20_000;
+    const MAX_PEER_STATES: usize = 4_096;
+
     pub fn should_request(&mut self, hash: [u8; 32], current_vtime: u64) -> bool {
+        if self.in_flight.len() >= Self::MAX_IN_FLIGHT {
+            let ttl = self.ttl_ms;
+            self.in_flight.retain(|_, req_time| current_vtime < *req_time + ttl);
+        }
         if let Some(&req_time) = self.in_flight.get(&hash) {
             // If the request is still alive within TTL, block it strictly! 
             // Prevents infinite loop network flooding.
@@ -135,6 +143,10 @@ impl SyncDebouncer {
 
     /// Line of Defense 3: Smart Progress Detection & Exponential Backoff.
     pub fn report_peer_progress(&mut self, peer_id: &str, has_progress: bool, current_vtime: u64) {
+        if self.peer_states.len() >= Self::MAX_PEER_STATES && !self.peer_states.contains_key(peer_id) {
+            // Forget peers with no strikes and no active ban.
+            self.peer_states.retain(|_, s| s.strikes > 0 || current_vtime < s.banned_until_vtime);
+        }
         let state = self.peer_states.entry(peer_id.to_string()).or_insert(PeerState::default());
         
         if has_progress {
@@ -155,5 +167,34 @@ impl SyncDebouncer {
                 state.banned_until_vtime = current_vtime + penalty_ms as u64;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+
+    #[test]
+    fn in_flight_map_stays_bounded() {
+        let mut d = SyncDebouncer::new(1_000);
+        for i in 0..(SyncDebouncer::MAX_IN_FLIGHT as u64 + 5_000) {
+            let mut h = [0u8; 32];
+            h[..8].copy_from_slice(&i.to_be_bytes());
+            assert!(d.should_request(h, i));
+        }
+        assert!(d.in_flight.len() <= SyncDebouncer::MAX_IN_FLIGHT);
+    }
+
+    #[test]
+    fn recent_request_is_still_debounced_after_pruning() {
+        let mut d = SyncDebouncer::new(1_000);
+        for i in 0..(SyncDebouncer::MAX_IN_FLIGHT as u64) {
+            let mut h = [0u8; 32];
+            h[..8].copy_from_slice(&i.to_be_bytes());
+            d.should_request(h, i);
+        }
+        let mut last = [0u8; 32];
+        last[..8].copy_from_slice(&(SyncDebouncer::MAX_IN_FLIGHT as u64 - 1).to_be_bytes());
+        assert!(!d.should_request(last, SyncDebouncer::MAX_IN_FLIGHT as u64));
     }
 }

@@ -47,6 +47,8 @@ pub enum MempoolError {
     FeeTooLow,
     // Rejected by tombstone cache.
     Tombstoned,
+    // Too large to ever fit in a block template.
+    TooLarge,
 }
 
 // -----------------------------------------------------------------------------
@@ -119,7 +121,13 @@ impl QuantumMempool {
         if tx_weight > crate::config::MAX_BLOCK_WEIGHT as u64 || tx_sigops > crate::config::MAX_BLOCK_SIGOPS as usize {
             return Err(MempoolError::MempoolFull); 
         }
-        if current_rate < crate::config::MIN_RELAY_FEE_RATE {
+        // A tx that can never fit in a template would sit here until it expires.
+        let max_tx_size = crate::config::MAX_TEMPLATE_BLOCK_BYTES.saturating_sub(crate::config::BLOCK_TEMPLATE_RESERVE_BYTES);
+        if tx.get_physical_size() > max_tx_size {
+            return Err(MempoolError::TooLarge);
+        }
+        // calculate_rate() is scaled by 1_000_000, MIN_RELAY_FEE_RATE is in sats/WU.
+        if current_rate < crate::config::MIN_RELAY_FEE_RATE.saturating_mul(1_000_000) {
             return Err(MempoolError::FeeTooLow);
         }
 
@@ -327,6 +335,17 @@ impl QuantumMempool {
             if is_invalidated { hashes_to_remove.push(*tx_hash); }
         }
 
+        // A pool tx that conflicts with the block (spends the same input but was
+        // not itself mined) can never confirm, and neither can anything built on
+        // its outputs: evict it together with its descendants. Mined txs are
+        // removed alone, since their children are now valid.
+        let mined_ids: HashSet<[u8; 32]> = mined_txs.iter().map(|tx| tx.calculate_id()).collect();
+        let (hashes_to_remove, conflicts): (Vec<_>, Vec<_>) =
+            hashes_to_remove.into_iter().partition(|h| mined_ids.contains(h));
+        for hash in &conflicts {
+            self.evict_transaction_and_descendants(hash);
+        }
+
         // Convert to HashSet for O(1) lookup to prevent CPU exhaustion.
         let remove_set: HashSet<_> = hashes_to_remove.into_iter().collect();
 
@@ -346,5 +365,70 @@ impl QuantumMempool {
         
         // Execute a single atomic memory sweep, preserving topological order at maximum speed.
         self.tx_pool.retain(|hash, _| !remove_set.contains(hash));
+    }
+}
+#[cfg(test)]
+mod hardening_tests {
+    use super::*;
+    use crate::transaction::{Transaction, TxIn, TxOut, TxWitness};
+
+    fn tx(inputs: &[([u8; 32], u32)], outputs: usize, sig_len: usize) -> Transaction {
+        Transaction {
+            inputs: inputs.iter().map(|(h, v)| TxIn { previous_output_hash: *h, vout: *v }).collect(),
+            outputs: (0..outputs).map(|_| TxOut { value: 1, public_key_hash: [7u8; 32], recovery: None }).collect(),
+            witnesses: inputs.iter().map(|_| TxWitness { signature: vec![1u8; sig_len], public_key: vec![2u8; 64] }).collect(),
+        }
+    }
+    fn fee_for(t: &Transaction, sats_per_wu: u64) -> u64 { t.get_weight() * sats_per_wu }
+
+    #[test]
+    fn rejects_fee_below_min_relay_rate() {
+        let mut mp = QuantumMempool::new();
+        let t = tx(&[([1u8; 32], 0)], 1, 3309);
+        // 1 sat/WU is below MIN_RELAY_FEE_RATE (5 sats/WU).
+        assert!(matches!(mp.add_transaction(t.clone(), fee_for(&t, 1)), Err(MempoolError::FeeTooLow)));
+        assert!(mp.add_transaction(t.clone(), fee_for(&t, 10)).is_ok());
+    }
+
+    #[test]
+    fn rejects_tx_too_large_for_any_template() {
+        let mut mp = QuantumMempool::new();
+        let t = tx(&[([2u8; 32], 0)], 1, 5_000_000);
+        assert!(matches!(mp.add_transaction(t.clone(), fee_for(&t, 10)), Err(MempoolError::TooLarge)));
+    }
+
+    #[test]
+    fn conflicting_tx_is_evicted_with_its_descendants() {
+        let mut mp = QuantumMempool::new();
+        let parent = tx(&[([3u8; 32], 0)], 1, 100);
+        let pid = parent.calculate_id();
+        let child = tx(&[(pid, 0)], 1, 100);
+        mp.add_transaction(parent.clone(), fee_for(&parent, 10)).unwrap();
+        mp.add_transaction(child.clone(), fee_for(&child, 10)).unwrap();
+
+        // A different tx spending the same input as `parent` gets mined.
+        let mined = tx(&[([3u8; 32], 0)], 2, 100);
+        mp.atomic_sweep(&[mined]);
+
+        assert!(mp.tx_pool.is_empty(), "parent and its child must both be gone");
+        assert_eq!(mp.current_weight, 0);
+        assert!(mp.spent_outpoints.is_empty());
+        assert!(mp.fee_index.is_empty());
+    }
+
+    #[test]
+    fn mined_parent_keeps_valid_child() {
+        let mut mp = QuantumMempool::new();
+        let parent = tx(&[([4u8; 32], 0)], 1, 100);
+        let pid = parent.calculate_id();
+        let child = tx(&[(pid, 0)], 1, 100);
+        let cid = child.calculate_id();
+        mp.add_transaction(parent.clone(), fee_for(&parent, 10)).unwrap();
+        mp.add_transaction(child.clone(), fee_for(&child, 10)).unwrap();
+
+        mp.atomic_sweep(&[parent]);
+
+        assert_eq!(mp.tx_pool.len(), 1);
+        assert!(mp.tx_pool.contains_key(&cid));
     }
 }
