@@ -138,6 +138,8 @@ impl QuantumMempool {
                     return Err(MempoolError::FeeTooLow);
                 }
                 self.evict_transaction_and_descendants(&lowest.tx_hash);
+                // Always make progress, even if the index had a stale entry.
+                self.fee_index.remove(&lowest);
             } else {
                 break;
             }
@@ -197,6 +199,24 @@ impl QuantumMempool {
                 }
             }
             self.evict_transaction_and_descendants(&hash);
+        }
+    }
+
+    /// Empties the pool and every index that describes it. Tombstones are kept
+    /// so the dropped txs aren't immediately re-admitted.
+    pub fn clear_pool(&mut self) {
+        self.tx_pool.clear();
+        self.fee_index.clear();
+        self.spent_outpoints.clear();
+        self.child_index.clear();
+        self.current_weight = 0;
+    }
+
+    /// Removes txs (and anything spending their outputs) while keeping every
+    /// index in sync. Use this instead of touching tx_pool directly.
+    pub fn remove_with_descendants(&mut self, hashes: &HashSet<[u8; 32]>) {
+        for hash in hashes {
+            self.evict_transaction_and_descendants(hash);
         }
     }
 
@@ -430,5 +450,56 @@ mod hardening_tests {
 
         assert_eq!(mp.tx_pool.len(), 1);
         assert!(mp.tx_pool.contains_key(&cid));
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+    use crate::transaction::{TxIn, TxOut, TxWitness};
+
+    fn tx(seed: u8, prev: [u8; 32]) -> Transaction {
+        Transaction {
+            inputs: vec![TxIn { previous_output_hash: prev, vout: 0 }],
+            outputs: vec![TxOut { value: seed as u64, public_key_hash: [seed; 32], recovery: None }],
+            witnesses: vec![TxWitness { signature: vec![seed; 64], public_key: vec![seed; 64] }],
+        }
+    }
+
+    #[test]
+    fn remove_with_descendants_keeps_indexes_in_sync() {
+        let mut mp = QuantumMempool::new();
+        let p = tx(1, [1u8; 32]);
+        let c = tx(2, p.calculate_id());
+        mp.add_transaction(p.clone(), p.get_weight() * 10).unwrap();
+        mp.add_transaction(c.clone(), c.get_weight() * 10).unwrap();
+        mp.remove_with_descendants(&[p.calculate_id()].into_iter().collect());
+        assert!(mp.tx_pool.is_empty());
+        assert!(mp.fee_index.is_empty());
+        assert!(mp.spent_outpoints.is_empty());
+        assert_eq!(mp.current_weight, 0);
+    }
+
+    #[test]
+    fn eviction_makes_progress_past_stale_fee_entries() {
+        let mut mp = QuantumMempool::new();
+        // Simulate drift: weight says the pool is full and the fee index points
+        // at a tx that is no longer in tx_pool.
+        mp.current_weight = QuantumMempool::MAX_MEMPOOL_WEIGHT;
+        mp.fee_index.insert(FeeRateKey { rate: 1, tx_hash: [0xEE; 32] });
+        let t = tx(3, [3u8; 32]);
+        // Must return instead of spinning; whether it is admitted depends on the weight left.
+        let _ = mp.add_transaction(t.clone(), t.get_weight() * 50);
+        assert!(!mp.fee_index.contains(&FeeRateKey { rate: 1, tx_hash: [0xEE; 32] }));
+    }
+
+    #[test]
+    fn clear_pool_resets_every_index() {
+        let mut mp = QuantumMempool::new();
+        let t = tx(4, [4u8; 32]);
+        mp.add_transaction(t.clone(), t.get_weight() * 10).unwrap();
+        mp.clear_pool();
+        assert!(mp.tx_pool.is_empty() && mp.fee_index.is_empty() && mp.spent_outpoints.is_empty());
+        assert_eq!(mp.current_weight, 0);
     }
 }

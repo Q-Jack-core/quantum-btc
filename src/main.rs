@@ -612,6 +612,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 continue;
             }
 
+            if incoming_height >= quantum_btc::config::WITNESS_COMMITMENT_ACTIVATION_HEIGHT
+                && !consensus::ConsensusEngine::verify_witness_commitment(&incoming_block) {
+                tracing::error!("[ERROR] Firewall: Witness commitment mismatch. Block dropped.");
+                continue;
+            }
+
             // L0 DEFENSE: Cryptographic Proof-of-Work and Merkle Tree verification.
             let is_fork_active = incoming_height >= quantum_btc::config::CONSENSUS_HARDFORK_V2_HEIGHT;
             let pow_check_result = if is_fork_active {
@@ -872,8 +878,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             if let Ok(blacklist) = resp_rx.await {
                                 if !blacklist.is_empty() {
                                     let mut guard = safe_lock!(mempool_async);
-                                    // Retain preserves insertion order perfectly for both HashMap and IndexMap
-                                    guard.tx_pool.retain(|k, _| !blacklist.contains(k));
+                                    let blacklist: std::collections::HashSet<[u8; 32]> = blacklist.iter().copied().collect();
+                                    guard.remove_with_descendants(&blacklist);
                                     tracing::info!("[INFO] Mempool: Asynchronous snapshot reconciliation purged {} ghost transactions.", blacklist.len());
                                 }
                             }
@@ -1685,7 +1691,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 // ML-DSA-65 signatures are exceptionally heavy. Enforce absolute physical cap of 10,000 txs (approx ~300MB).
                 if mempool_guard.tx_pool.len() > 10000 {
                     tracing::warn!("[WARN] Watchdog: Mempool physical memory redline crossed (>10,000 txs). Executing emergency wipe to prevent OOM.");
-                    mempool_guard.tx_pool.clear(); 
+                    mempool_guard.clear_pool(); 
                 }
                 drop(mempool_guard);
 
@@ -1976,6 +1982,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         if safe_lock!(reputation).report_offense(&sender, NetworkOffense::InvalidHeader) {
                                             let _ = swarm.disconnect_peer_id(sender);
                                         }
+                                        continue;
+                                    }
+
+                                    // The PoW below is checked against the target the announcer chose.
+                                    // Outside IBD, ignore announcements claiming a target far easier than
+                                    // what the network currently requires: they cost almost nothing to make.
+                                    let in_ibd = current_physical_time.saturating_sub(safe_lock!(latest_block).header.timestamp) > 86400;
+                                    let expected_target = current_target.load(Ordering::Relaxed);
+                                    if !in_ibd && expected_target > 0 && header.target > expected_target.saturating_mul(4) {
+                                        tracing::warn!("[WARN] Firewall: BlockAnnouncement target far above the current requirement. Ignored.");
                                         continue;
                                     }
 
@@ -2344,6 +2360,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     continue;
                                                 }
                                                 let compact_block = cb_opt.unwrap();
+                                                // No valid block has more txs than this; bound the work a
+                                                // single response can cause before building any lookups.
+                                                const MAX_COMPACT_TXS: usize = 100_000;
+                                                if compact_block.short_ids.len() > MAX_COMPACT_TXS || compact_block.prefilled_txs.len() > MAX_COMPACT_TXS + 1 {
+                                                    if safe_lock!(reputation).report_offense(&peer, NetworkOffense::MalformedData) {
+                                                        let _ = swarm.disconnect_peer_id(peer);
+                                                    }
+                                                    continue;
+                                                }
+                                                let prefilled: HashMap<usize, &Transaction> = compact_block.prefilled_txs.iter().map(|p| (p.index, &p.tx)).collect();
                                                 let mut available_txs = HashMap::new();
                                                 let mempool_guard = safe_lock!(mempool);
                                                 for entry in mempool_guard.tx_pool.values() {
@@ -2356,14 +2382,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 let mut partial_map = std::collections::HashMap::new();
                                                 let mut missing_indexes = Vec::new();
                                                 
-                                                if let Some(p) = compact_block.prefilled_txs.iter().find(|p| p.index == 0) {
-                                                    partial_map.insert(0, p.tx.clone());
+                                                if let Some(tx) = prefilled.get(&0) {
+                                                    partial_map.insert(0, (*tx).clone());
                                                 } else { missing_indexes.push(0); }
 
                                                 for (i, short_id) in compact_block.short_ids.iter().enumerate() {
                                                     let actual_index = i + 1;
-                                                    if let Some(p) = compact_block.prefilled_txs.iter().find(|p| p.index == actual_index) {
-                                                        partial_map.insert(actual_index, p.tx.clone());
+                                                    if let Some(tx) = prefilled.get(&actual_index) {
+                                                        partial_map.insert(actual_index, (*tx).clone());
                                                     } else if let Some(tx) = available_txs.get(short_id) {
                                                         partial_map.insert(actual_index, tx.clone());
                                                     } else {
@@ -2418,15 +2444,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     let mut final_txs = Vec::new();
                                                     let mut fetched_iter = transactions.into_iter();
                                                     let total_expected = 1 + cb.short_ids.len();
+                                                    let prefilled: HashMap<usize, &Transaction> = cb.prefilled_txs.iter().map(|p| (p.index, &p.tx)).collect();
+                                                    let mut mismatch = false;
                                                     
                                                     for curr_idx in 0..total_expected {
-                                                        if let Some(p) = cb.prefilled_txs.iter().find(|p| p.index == curr_idx) {
-                                                            final_txs.push(p.tx.clone());
+                                                        if let Some(tx) = prefilled.get(&curr_idx) {
+                                                            final_txs.push((*tx).clone());
                                                         } else if let Some(tx) = partial_map.remove(&curr_idx) {
                                                             final_txs.push(tx);
                                                         } else if let Some(tx) = fetched_iter.next() {
+                                                            // A fetched tx must be the one the compact block committed to.
+                                                            if curr_idx > 0 {
+                                                                let sid = crate::block::CompactBlock::calculate_short_id(&tx.calculate_id(), cb.nonce);
+                                                                if cb.short_ids.get(curr_idx - 1) != Some(&sid) { mismatch = true; break; }
+                                                            }
                                                             final_txs.push(tx);
                                                         }
+                                                    }
+                                                    if mismatch {
+                                                        if let Ok(peer_id) = responder.parse::<libp2p::PeerId>() {
+                                                            if safe_lock!(reputation).report_offense(&peer_id, NetworkOffense::MalformedData) {
+                                                                let _ = swarm.disconnect_peer_id(peer_id);
+                                                            }
+                                                        }
+                                                        continue;
                                                     }
 
                                                     fully_assembled_blocks.push(Block { header: cb.header, transactions: final_txs });
@@ -2912,7 +2953,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                             if let Ok(blacklist) = resp_rx.await {
                                                                 if !blacklist.is_empty() {
                                                                     let mut guard = safe_lock!(mempool_async);
-                                                                    guard.tx_pool.retain(|k, _| !blacklist.contains(k));
+                                                                    let blacklist: std::collections::HashSet<[u8; 32]> = blacklist.iter().copied().collect();
+                                                                    guard.remove_with_descendants(&blacklist);
                                                                     tracing::info!("[INFO] Mempool: Deep Reorg async reconciliation purged {} ghost transactions.", blacklist.len());
                                                                 }
                                                             }
