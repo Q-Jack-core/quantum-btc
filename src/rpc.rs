@@ -190,8 +190,8 @@ async fn api_wallet_gen(State(state): State<RpcState>, Json(req): Json<WalletAct
     
     match crate::wallet::QuantumWallet::restore_from_mnemonic(&phrase) {
         Ok(w) => {
-            if let Err(e) = w.save_to_disk_secure(&state.datadir, &req.wallet_name, &pwd) {
-                return Json(WalletActionRes { success: false, message: format!("Encryption Failed: {}", e), address: None, mnemonic: None });
+            if let Err(e) = w.create_on_disk_secure(&state.datadir, &req.wallet_name, &pwd) {
+                return Json(WalletActionRes { success: false, message: e, address: None, mnemonic: None });
             }
             Json(WalletActionRes { success: true, message: "Wallet initialized successfully.".to_string(), address: Some(w.qbtc_address), mnemonic: Some(phrase) })
         },
@@ -204,8 +204,8 @@ async fn api_wallet_restore(State(state): State<RpcState>, Json(req): Json<Walle
         let pwd = req.password.filter(|s| !s.trim().is_empty()).unwrap_or_else(|| "CLI_DEFAULT_LOCK".to_string());
         match crate::wallet::QuantumWallet::restore_from_mnemonic(&phrase) {
             Ok(w) => {
-                if let Err(e) = w.save_to_disk_secure(&state.datadir, &req.wallet_name, &pwd) {
-                    return Json(WalletActionRes { success: false, message: format!("Encryption Failed: {}", e), address: None, mnemonic: None });
+                if let Err(e) = w.create_on_disk_secure(&state.datadir, &req.wallet_name, &pwd) {
+                    return Json(WalletActionRes { success: false, message: e, address: None, mnemonic: None });
                 }
                 Json(WalletActionRes { success: true, message: "Wallet restored successfully.".to_string(), address: Some(w.qbtc_address), mnemonic: None })
             },

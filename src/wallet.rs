@@ -126,8 +126,54 @@ impl QuantumWallet {
         Ok(wallet)
     }
 
-    // Persists keystore payload to isolated datadir.
+    // Keystore path for an alias. Rejects anything that could escape the
+    // keystores directory (separators, "..", NUL, drive prefixes).
+    fn keystore_file(datadir: &str, name: &str) -> Result<String, String> {
+        if name.is_empty() || name.contains(['/', '\\', ':', '\0']) || name.contains("..") {
+            return Err(format!("Invalid wallet name '{}'.", name));
+        }
+        Ok(format!("{}/keystores/{}.dat", datadir, name))
+    }
+
+    // Names allowed for newly created wallets.
+    pub fn validate_new_wallet_name(name: &str) -> Result<(), String> {
+        let ok_len = (1..=64).contains(&name.len());
+        let ok_chars = name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+        if ok_len && ok_chars {
+            Ok(())
+        } else {
+            Err("Wallet name must be 1-64 characters: letters, digits, '_' or '-'.".to_string())
+        }
+    }
+
+    // Creates a new keystore. Never replaces an existing one: overwriting a
+    // keystore destroys its keys, and on a shared node anyone could do it to
+    // someone else's wallet just by reusing the alias.
+    pub fn create_on_disk_secure(&self, datadir: &str, name: &str, password: &str) -> Result<(), String> {
+        Self::validate_new_wallet_name(name)?;
+        let file_path = Self::keystore_file(datadir, name)?;
+        let final_data = self.encrypt_keystore(password)?;
+        let _ = fs::create_dir_all(format!("{}/keystores", datadir));
+        let mut file = fs::OpenOptions::new().write(true).create_new(true).open(&file_path)
+            .map_err(|e| if e.kind() == std::io::ErrorKind::AlreadyExists {
+                format!("Wallet '{}' already exists. Choose a different name.", name)
+            } else {
+                e.to_string()
+            })?;
+        std::io::Write::write_all(&mut file, &final_data).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    // Re-saves an existing keystore (e.g. password change). Overwrites.
     pub fn save_to_disk_secure(&self, datadir: &str, name: &str, password: &str) -> Result<(), String> {
+        let file_path = Self::keystore_file(datadir, name)?;
+        let final_data = self.encrypt_keystore(password)?;
+        let _ = fs::create_dir_all(format!("{}/keystores", datadir));
+        fs::write(file_path, final_data).map_err(|e| e.to_string())?;
+        Ok(())
+    }
+
+    fn encrypt_keystore(&self, password: &str) -> Result<Vec<u8>, String> {
         let mut salt = [0u8; 16];
         UnwrapErr(SysRng).fill_bytes(&mut salt);
         
@@ -153,19 +199,12 @@ impl QuantumWallet {
             ciphertext,
         };
 
-        let dir_path = format!("{}/keystores", datadir);
-        let _ = fs::create_dir_all(&dir_path);
-        let file_path = format!("{}/{}.dat", dir_path, name);
-        
-        let final_data = bincode::serialize(&keystore).map_err(|e| e.to_string())?;
-        fs::write(file_path, final_data).map_err(|e| e.to_string())?;
-        
-        Ok(())
+        bincode::serialize(&keystore).map_err(|e| e.to_string())
     }
 
     // Loads keystore using secure datadir decoupling.
     pub fn load_from_disk_secure(datadir: &str, name: &str, password: &str) -> Result<Self, String> {
-        let file_path = format!("{}/keystores/{}.dat", datadir, name);
+        let file_path = Self::keystore_file(datadir, name)?;
         let data = fs::read(&file_path).map_err(|_| format!("Keystore file '{}.dat' not found in datadir.", name))?;
         
         if let Ok(keystore) = bincode::deserialize::<EncryptedKeystoreV2>(&data) {
@@ -183,7 +222,7 @@ impl QuantumWallet {
 
     // Retrieves public info using decoupled datadir path.
     pub fn get_public_info(datadir: &str, name: &str) -> Option<(Vec<u8>, String)> {
-        let file_path = format!("{}/keystores/{}.dat", datadir, name);
+        let file_path = Self::keystore_file(datadir, name).ok()?;
         if let Ok(data) = fs::read(&file_path) {
             if let Ok(keystore) = bincode::deserialize::<EncryptedKeystoreV2>(&data) {
                 return Some((keystore.root_pubkey, keystore.primary_address));
