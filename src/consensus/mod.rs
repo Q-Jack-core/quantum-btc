@@ -138,12 +138,27 @@ impl ConsensusEngine {
     }
 
     /// Validates transaction integrity with O(N) time and minimal memory footprint.
+    /// Checks commit_merkle_root against the block's witness hashes, binding
+    /// the signatures to the block hash the same way merkle_root binds the txs.
+    pub fn verify_witness_commitment(block: &Block) -> bool {
+        let witness_hashes: Vec<[u8; 32]> = block.transactions.iter()
+            .map(|tx| tx.calculate_witness_hash())
+            .collect();
+        crate::crypto::merkle::build_merkle_root(witness_hashes) == block.header.commit_merkle_root
+    }
+
     pub fn verify_merkle_root(block: &Block) -> bool {
         if block.transactions.is_empty() { return false; }
 
         let mut current_level: Vec<[u8; 32]> = block.transactions.iter()
             .map(|tx| tx.calculate_id())
             .collect();
+
+        // CVE-2012-2459: duplicated txids can produce the same root as a
+        // different transaction list, so they are never valid.
+        if crate::crypto::merkle::has_duplicate_txs(&current_level) {
+            return false;
+        }
 
         while current_level.len() > 1 {
             if current_level.len() % 2 != 0 {
@@ -219,3 +234,39 @@ pub fn verify_checkpoint(height: u64, block_hash: &[u8; 32]) -> Result<(), &'sta
 }
 
 
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+    use crate::transaction::{Transaction, TxIn, TxOut, TxWitness};
+
+    fn tx(seed: u8) -> Transaction {
+        Transaction {
+            inputs: vec![TxIn { previous_output_hash: [seed; 32], vout: 0 }],
+            outputs: vec![TxOut { value: 1, public_key_hash: [seed; 32], recovery: None }],
+            witnesses: vec![TxWitness { signature: vec![seed; 8], public_key: vec![seed; 8] }],
+        }
+    }
+
+    #[test]
+    fn duplicate_txids_never_pass_merkle_check() {
+        let (a, b, c) = (tx(1), tx(2), tx(3));
+        let good = Block::new([0u8; 32], vec![a.clone(), b.clone(), c.clone()], 1, 0);
+        assert!(ConsensusEngine::verify_merkle_root(&good));
+        // [a, b, c, c] hashes to the same root as [a, b, c] (odd leaf duplication).
+        let mut dup = good.clone();
+        dup.transactions = vec![a, b, c.clone(), c];
+        assert_eq!(crate::crypto::merkle::build_merkle_root(dup.transactions.iter().map(|t| t.calculate_id()).collect()), good.header.merkle_root);
+        assert!(!ConsensusEngine::verify_merkle_root(&dup));
+    }
+
+    #[test]
+    fn witness_commitment_binds_signatures() {
+        let block = Block::new([0u8; 32], vec![tx(1), tx(2)], 1, 0);
+        assert!(ConsensusEngine::verify_witness_commitment(&block));
+        let mut tampered = block.clone();
+        tampered.transactions[1].witnesses[0].signature = vec![9u8; 8];
+        assert!(ConsensusEngine::verify_merkle_root(&tampered), "txids unchanged");
+        assert!(!ConsensusEngine::verify_witness_commitment(&tampered));
+    }
+}

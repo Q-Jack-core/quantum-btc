@@ -72,6 +72,28 @@ pub struct UtxoState {
     pub verified_tx_cache: HashSet<[u8; 32]>,
 }
 
+/// Upper bound for any single amount or sum of amounts.
+pub const MAX_MONEY: u64 = 21_000_000 * 100_000_000;
+
+/// Sum of output values, rejecting any value or running total above MAX_MONEY.
+fn checked_output_sum(outputs: &[TxOut]) -> Result<u64, &'static str> {
+    let mut sum: u64 = 0;
+    for o in outputs {
+        if o.value > MAX_MONEY {
+            return Err("Consensus Violation: output value out of range.");
+        }
+        sum = sum.checked_add(o.value).filter(|s| *s <= MAX_MONEY)
+            .ok_or("Consensus Violation: total output value out of range.")?;
+    }
+    Ok(sum)
+}
+
+/// Adds an amount to a running total with the same MAX_MONEY bound.
+fn checked_money_add(total: u64, value: u64) -> Result<u64, &'static str> {
+    total.checked_add(value).filter(|s| *s <= MAX_MONEY)
+        .ok_or("Consensus Violation: value sum out of range.")
+}
+
 impl UtxoState {
     /// Initializes an empty UTXO state.
     pub fn new() -> Self {
@@ -241,7 +263,7 @@ impl UtxoState {
         //  Dust Limit check completely stripped from Consensus Rule.
         // Relocated to network Relay Policy to prevent Hard Forks.
 
-        let mut input_sum = 0;
+        let mut input_sum: u64 = 0;
         // Use the SegWit-safe TXID (Excludes Witnesses) for the message hash.
         let tx_core_hash = tx.calculate_id();
         
@@ -298,10 +320,10 @@ impl UtxoState {
                     return Err("Invalid signature and no recovery protocol defined.");
                 }
             }
-            input_sum += record.output.value;
+            input_sum = checked_money_add(input_sum, record.output.value)?;
         }
 
-        let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+        let output_sum = checked_output_sum(&tx.outputs)?;
         if input_sum < output_sum { return Err("Transaction outputs exceed inputs."); }
         // Calculate and return the implicit transaction fee.
         Ok(input_sum - output_sum)
@@ -379,7 +401,7 @@ impl UtxoState {
                     return Err("Layer-2 verification requires upgraded node implementation.");
                 }
 
-                let mut input_sum = 0;
+                let mut input_sum: u64 = 0;
                 for (i, input) in tx.inputs.iter().enumerate() {
                     let op = OutPoint { tx_hash: input.previous_output_hash, vout: input.vout };
                     
@@ -403,12 +425,12 @@ impl UtxoState {
                     
                     // Queue for Phase 2 parallel computation
                     signature_tasks.push((tx, i, tx_core_hash, record.clone()));
-                    input_sum += record.output.value;
+                    input_sum = checked_money_add(input_sum, record.output.value)?;
                 }
 
-                let output_sum: u64 = tx.outputs.iter().map(|o| o.value).sum();
+                let output_sum = checked_output_sum(&tx.outputs)?;
                 if input_sum < output_sum { return Err("Transaction outputs exceed inputs."); }
-                total_fees += input_sum - output_sum;
+                total_fees = checked_money_add(total_fees, input_sum - output_sum)?;
             }
 
             // Populate virtual cache for subsequent transactions in the SAME block
@@ -424,8 +446,8 @@ impl UtxoState {
 
         // Pre-flight coinbase validation.
         // Ensures atomic state mutation by rejecting invalid blocks prior to Phase 2/3 execution.
-        let coinbase_output_sum: u64 = block.transactions[0].outputs.iter().map(|o| o.value).sum();
-        let expected_max = crate::economics::CentralBank::get_block_reward(height) + total_fees;
+        let coinbase_output_sum = checked_output_sum(&block.transactions[0].outputs)?;
+        let expected_max = checked_money_add(crate::economics::CentralBank::get_block_reward(height), total_fees)?;
         if coinbase_output_sum > expected_max {
             return Err("Consensus Violation: Coinbase output value exceeds block reward plus fees.");
         }
@@ -674,5 +696,43 @@ mod hardening_tests {
         one.witnesses = vec![w()];
         let err = state.validate_transaction(&one, 1_000, false).unwrap_err();
         assert!(!err.contains("one witness per input"), "got: {err}");
+    }
+}
+
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+    use crate::transaction::{TxIn, TxOut, TxWitness};
+
+    fn out(v: u64) -> TxOut { TxOut { value: v, public_key_hash: [1u8; 32], recovery: None } }
+
+    #[test]
+    fn output_values_are_range_checked() {
+        assert!(checked_output_sum(&[out(MAX_MONEY + 1)]).is_err());
+        assert!(checked_output_sum(&[out(MAX_MONEY), out(1)]).is_err());
+        assert!(checked_output_sum(&[out(u64::MAX), out(2)]).is_err());
+        assert_eq!(checked_output_sum(&[out(10), out(20)]), Ok(30));
+    }
+
+    #[test]
+    fn mempool_rejects_out_of_range_outputs() {
+        use sha2::{Digest, Sha256};
+        let pk = vec![7u8; 16];
+        let owner: [u8; 32] = Sha256::digest(&pk).into();
+        let op = OutPoint { tx_hash: [5u8; 32], vout: 0 };
+        let mut s = UtxoState::new();
+        s.unspent_outputs.insert(op.clone(), UtxoRecord {
+            output: TxOut { value: 1_000, public_key_hash: owner, recovery: None },
+            height: 1, is_coinbase: false,
+        });
+        let tx = Transaction {
+            inputs: vec![TxIn { previous_output_hash: op.tx_hash, vout: 0 }],
+            outputs: vec![out(u64::MAX), out(2)],
+            witnesses: vec![TxWitness { signature: vec![], public_key: pk }],
+        };
+        // Pre-mark as verified so the check under test is the only thing that can fail.
+        s.verified_tx_cache.insert(tx.calculate_id());
+        let err = s.validate_transaction(&tx, 1_000, true).unwrap_err();
+        assert!(err.contains("out of range"), "got: {err}");
     }
 }

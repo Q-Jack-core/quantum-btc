@@ -6,7 +6,7 @@ use axum::{
     middleware::{self, Next},
     response::Response,
 };
-use tower_http::cors::{Any, CorsLayer};
+use tower_http::cors::{AllowOrigin, CorsLayer};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 use std::net::SocketAddr;
@@ -124,25 +124,67 @@ pub struct VerifyTargetResponse {
     pub message: String,
 }
 
+// Constant-time comparison so response timing doesn't leak the token.
+fn ct_eq(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() { return false; }
+    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+}
+
+// Without a token the RPC is only trusted for requests that really target the
+// local node. Checking Host stops pages that rebind their own domain to
+// 127.0.0.1 from reaching it through the browser. Reverse proxies can list
+// their public host names in QBTC_RPC_ALLOWED_HOSTS (or set QBTC_RPC_TOKEN).
+fn host_allowed(req: &Request) -> bool {
+    let host = match req.headers().get(axum::http::header::HOST).and_then(|h| h.to_str().ok()) {
+        Some(h) => h.to_ascii_lowercase(),
+        None => return false,
+    };
+    let name = if host.starts_with('[') {
+        host.split(']').next().map(|h| format!("{}]", h)).unwrap_or_default()
+    } else {
+        host.split(':').next().unwrap_or("").to_string()
+    };
+    if matches!(name.as_str(), "127.0.0.1" | "localhost" | "[::1]") {
+        return true;
+    }
+    std::env::var("QBTC_RPC_ALLOWED_HOSTS")
+        .map(|list| list.split(',').any(|h| h.trim().eq_ignore_ascii_case(&name)))
+        .unwrap_or(false)
+}
+
 async fn token_auth(req: Request, next: Next) -> Result<Response, axum::http::StatusCode> {
     let expected = std::env::var("QBTC_RPC_TOKEN").unwrap_or_default();
-    if expected.is_empty() { return Ok(next.run(req).await); }
+    if expected.is_empty() {
+        if host_allowed(&req) { return Ok(next.run(req).await); }
+        return Err(axum::http::StatusCode::FORBIDDEN);
+    }
     
     if let Some(auth) = req.headers().get(axum::http::header::AUTHORIZATION) {
-        if let Ok(token) = auth.to_str() {
-            if token == expected { return Ok(next.run(req).await); }
-        }
+        if ct_eq(auth.as_bytes(), expected.as_bytes()) { return Ok(next.run(req).await); }
     }
     Err(axum::http::StatusCode::UNAUTHORIZED)
+}
+
+// Browser origins allowed to call the RPC: the desktop app's webview, plus
+// anything listed in QBTC_RPC_CORS_ORIGINS. Arbitrary websites are refused.
+fn rpc_cors() -> CorsLayer {
+    let mut origins: Vec<axum::http::HeaderValue> = ["tauri://localhost", "http://tauri.localhost", "https://tauri.localhost"]
+        .iter()
+        .filter_map(|o| axum::http::HeaderValue::from_str(o).ok())
+        .collect();
+    if let Ok(extra) = std::env::var("QBTC_RPC_CORS_ORIGINS") {
+        origins.extend(extra.split(',').filter_map(|o| axum::http::HeaderValue::from_str(o.trim()).ok()));
+    }
+    CorsLayer::new()
+        .allow_origin(AllowOrigin::list(origins))
+        .allow_methods([axum::http::Method::GET, axum::http::Method::POST])
+        .allow_headers([axum::http::header::CONTENT_TYPE, axum::http::header::AUTHORIZATION])
 }
 pub async fn start_rpc_server(port: u16, state: RpcState) {
     let rpc_port = port + 4000;
     let addr = SocketAddr::from(([127, 0, 0, 1], rpc_port));
     
-    let cors = CorsLayer::new()
-        .allow_origin(Any)
-        .allow_methods(Any)
-        .allow_headers(Any);
+    let cors = rpc_cors();
     
     let app = Router::new()
         .route("/api/get_info", get(get_node_info))
@@ -715,6 +757,27 @@ async fn api_submit_block(State(state): State<RpcState>, Json(req): Json<SubmitB
         }
     }
 
+    // 3. The same structural checks the P2P path runs before touching state.
+    if block.get_physical_size() > crate::config::MAX_BLOCK_SIZE_BYTES
+        || block.get_block_weight() > crate::config::MAX_BLOCK_WEIGHT as u64
+        || block.get_block_sigops() > crate::config::MAX_BLOCK_SIGOPS as usize {
+        return Json(ApiResponse { success: false, message: "Rejected: block exceeds size, weight or sigops limits".to_string(), tx_hash: None });
+    }
+    if !crate::consensus::ConsensusEngine::verify_merkle_root(&block) {
+        return Json(ApiResponse { success: false, message: "Rejected: merkle root mismatch".to_string(), tx_hash: None });
+    }
+    let past_timestamps: Vec<u64> = {
+        let chain = state.storage.get_chain_list();
+        let mut ts: Vec<u64> = chain.iter().rev().take(11)
+            .filter_map(|h| state.storage.get_header(h).map(|hd| hd.timestamp))
+            .collect();
+        ts.reverse();
+        ts
+    };
+    if let Err(e) = crate::consensus::ConsensusEngine::verify_timestamp(&block, &past_timestamps) {
+        return Json(ApiResponse { success: false, message: format!("Rejected: {e}"), tx_hash: None });
+    }
+
     // 3. Dispatch to isolated UtxoActor for ML-DSA-65 validation.
     let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
     let _ = state.utxo_tx.send(crate::utxo::UtxoCommand::ApplyBlock {
@@ -750,5 +813,30 @@ async fn api_submit_block(State(state): State<RpcState>, Json(req): Json<SubmitB
         Err(e) => {
             Json(ApiResponse { success: false, message: format!("Rejected by Consensus: {}", e), tx_hash: None })
         }
+    }
+}
+#[cfg(test)]
+mod validation_tests {
+    use super::*;
+
+    fn req_with_host(h: &str) -> Request {
+        axum::http::Request::builder().uri("/api/get_info").header(axum::http::header::HOST, h)
+            .body(axum::body::Body::empty()).unwrap()
+    }
+
+    #[test]
+    fn token_compare_is_exact() {
+        assert!(ct_eq(b"secret", b"secret"));
+        assert!(!ct_eq(b"secret", b"secreT"));
+        assert!(!ct_eq(b"secret", b"secret2"));
+    }
+
+    #[test]
+    fn only_local_hosts_without_token() {
+        assert!(host_allowed(&req_with_host("127.0.0.1:12001")));
+        assert!(host_allowed(&req_with_host("localhost:12001")));
+        assert!(host_allowed(&req_with_host("[::1]:12001")));
+        assert!(!host_allowed(&req_with_host("evil.example:12001")));
+        assert!(!host_allowed(&req_with_host("127.0.0.1.evil.example")));
     }
 }
