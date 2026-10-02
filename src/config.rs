@@ -21,7 +21,7 @@ pub const MAX_WALLET_TX_BYTES: u64 = 2_500_000;
 // Height from which blocks must commit to their witnesses via
 // commit_merkle_root. Disabled (u64::MAX) until an activation height is
 // chosen after checking that every historical block already satisfies it.
-pub const WITNESS_COMMITMENT_ACTIVATION_HEIGHT: u64 = u64::MAX;
+pub const WITNESS_COMMITMENT_ACTIVATION_HEIGHT: u64 = 25_000;
 
 // Maximum allowable Signature Operations per block.
 pub const MAX_BLOCK_SIGOPS: u32 = 80_000;

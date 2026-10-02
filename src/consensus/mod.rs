@@ -9,6 +9,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 // Max future time allowance (1 hour)
 pub const MAX_FUTURE_TIME_SECS: u64 = 3600; 
 
+// Absolute network target ceiling.
+// Preserved for backward compatibility with historical consensus (Block 1938).
+// Dynamic runtime difficulty is strictly bounded by the ASERT engine.
 pub const MAX_TARGET: u64 = 0x0000_00FF_FFFF_FFFF;
 
 static LAST_PRINTED_HEIGHT: AtomicU64 = AtomicU64::new(0);
@@ -27,7 +30,7 @@ impl ConsensusEngine {
             return anchor_target; 
         }
 
-        // CORE-V2: Genesis override for Block 1938 rescue operation.
+        // CORE-V2: Historical consensus override for Block 1938.
         if chain_length == 1938 {
             return 0x0000_00FF_FFFF_FFFF;
         }
@@ -207,6 +210,9 @@ lazy_static! {
         // GENESIS LOCK: THE 10000 BLOCK MILESTONE
         // =================================================================
         m.insert(10000, parse_hex("000000000089f7e3ca2260477c830545abd6e02fc514703e39f2c25fd30486d4"));
+
+        // Immutable trust anchor following PR #8 validation hardening.
+        m.insert(22800, parse_hex("00000000008d248f87a702956598d8211500fffb7da871053b40dbf8c78856ca"));
 
         m
     };
