@@ -8,6 +8,7 @@ use quantum_btc::economics;
 use quantum_btc::mempool;
 use quantum_btc::miner;
 use quantum_btc::network;
+use quantum_btc::network::block_tracker::{BlockDownloadTracker, TrackerAction};
 use quantum_btc::rpc;
 use quantum_btc::storage;
 use quantum_btc::transaction;
@@ -37,9 +38,6 @@ lazy_static! {
 
 // RAII IO semaphore for bounded connection load shedding.
 pub static ACTIVE_IO_TASKS: AtomicUsize = AtomicUsize::new(0);
-
-pub static FALLBACK_GUARD: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
 
 pub struct IoTaskGuard;
 impl IoTaskGuard {
@@ -2136,7 +2134,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     //  Initialize aerospace-grade network debouncer (TTL: 15 seconds)
     let mut sync_debouncer = quantum_btc::network::sync_manager::SyncDebouncer::new(15_000);
-
+    // Deterministic in-flight block state machine
+    let mut block_tracker =
+        BlockDownloadTracker::<libp2p::request_response::OutboundRequestId>::new();
     loop {
         // V1.2 FIX: Inject independent periodic Watchdog for P2P connection lifecycle & Mempool cleanup.
         let sleep = tokio::time::sleep(tokio::time::Duration::from_secs(10));
@@ -2178,6 +2178,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     pending_compact_blocks.clear();
                     tracing::warn!("[WARN] Watchdog: Compact block pool capacity exceeded. Executed memory purge.");
                 }
+
+                // Prune stale in-flight block download tasks (> 30s)
+                block_tracker.prune_stale_tasks(30_000);
 
                 //  Trigger UTXO Resurrection via TTL Mempool Purge (2 Hours).
                 let mut mempool_guard = safe_lock!(mempool);
@@ -2500,8 +2503,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     block_hash: hash,
                                                     requester: local_peer_id.to_string(),
                                                 };
-                                                // Route request via physical propagation_source to prevent NAT dropping.
-                                                let _ = swarm.behaviour_mut().req_resp.send_request(&propagation_source, req);
+                                                // Dispatch compact block request and register active task in state tracker
+                                                let req_id = swarm.behaviour_mut().req_resp.send_request(&propagation_source, req);
+                                                block_tracker.on_request_compact(req_id, hash, propagation_source);
                                             } else {
                                                 tracing::warn!("[WARN] Sync: Orphan announcement detected. Triggering Headers-First sync.");
                                                 let current_index = storage.get_chain_list().len();
@@ -2835,26 +2839,70 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                         match response {
                                             crate::network::SyncResponse::DataResponse { blocks, responder } => {
-                                                if !blocks.is_empty() {
-                                                    safe_lock!(reputation).reward_sync_success(&peer);
+                                                if blocks.is_empty() {
+                                                    // Peer returned empty payload; trigger failover rescue to prevent 15s freeze
+                                                    match block_tracker.on_network_failure(&request_id) {
+                                                        TrackerAction::FetchFullBlock { peer: target_peer, hash } => {
+                                                            sync_debouncer.in_flight.remove(&hash);
+                                                            let fallback_req = crate::network::SyncRequest::GetData {
+                                                                hashes: vec![hash],
+                                                                requester: local_peer_id.to_string(),
+                                                                mode: crate::network::SyncMode::Full,
+                                                            };
+                                                            let new_req_id = swarm.behaviour_mut().req_resp.send_request(&target_peer, fallback_req);
+                                                            block_tracker.register_full_request(new_req_id, hash);
+                                                        }
+                                                        TrackerAction::RescueSync { peer: target_peer } => {
+                                                            let current_index = storage.get_chain_list().len();
+                                                            let _ = sos_tx.try_send((current_index, Some(target_peer)));
+                                                        }
+                                                        TrackerAction::None => {
+                                                            if let Ok(peer_id) = responder.parse::<libp2p::PeerId>() {
+                                                                let current_index = storage.get_chain_list().len();
+                                                                let _ = sos_tx.try_send((current_index, Some(peer_id)));
+                                                            }
+                                                        }
+                                                    }
+                                                    continue;
                                                 }
+                                                for b in &blocks {
+                                                    block_tracker.on_block_saved(&b.calculate_hash()); // Deregister completed full block
+                                                }
+                                                safe_lock!(reputation).reward_sync_success(&peer);
                                                 fully_assembled_blocks = blocks;
                                                 responder_str = responder;
                                             }
                                             crate::network::SyncResponse::CompactBlockResponse { compact_block: cb_opt, responder } => {
 
                                                 if cb_opt.is_none() {
-                                                    if !FALLBACK_GUARD.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                                                        tracing::warn!("[WARN] Sync: Peer {} is downloading payload. Guarded fallback scheduled.", responder);
-                                                        let sos_tx_clone = sos_tx.clone();
-                                                        tokio::spawn(async move {
-                                                            tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                                                            let _ = sos_tx_clone.try_send((0, None));
-                                                            FALLBACK_GUARD.store(false, std::sync::atomic::Ordering::SeqCst);
-                                                        });
+                                                    // Immediate deterministic failover without sleep timers or global locks
+                                                    match block_tracker.on_compact_failed(&request_id) {
+                                                        TrackerAction::FetchFullBlock { peer, hash } => {
+                                                            sync_debouncer.in_flight.remove(&hash);
+                                                            tracing::warn!("[WARN] Sync: Peer {} is verifying block. Retrying target block...", responder);
+                                                            let fallback_req = crate::network::SyncRequest::GetData {
+                                                                hashes: vec![hash],
+                                                                requester: local_peer_id.to_string(),
+                                                                mode: crate::network::SyncMode::Full
+                                                            };
+                                                            let new_req_id = swarm.behaviour_mut().req_resp.send_request(&peer, fallback_req);
+                                                            block_tracker.register_full_request(new_req_id, hash);
+                                                        }
+                                                        TrackerAction::RescueSync { peer } => {
+                                                            let current_index = storage.get_chain_list().len();
+                                                            let _ = sos_tx.try_send((current_index, Some(peer)));
+                                                        }
+                                                        TrackerAction::None => {
+                                                            // Untracked fallback: trigger targeted headers reconciliation
+                                                            if let Ok(target_peer) = responder.parse::<libp2p::PeerId>() {
+                                                                let current_index = storage.get_chain_list().len();
+                                                                let _ = sos_tx.try_send((current_index, Some(target_peer)));
+                                                            }
+                                                        }
                                                     }
                                                     continue;
                                                 }
+
                                                 let compact_block = cb_opt.unwrap();
                                                 // No valid block has more txs than this; bound the work a
                                                 // single response can cause before building any lookups.
@@ -2916,6 +2964,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         }
                                                     }
                                                     fully_assembled_blocks.push(Block { header: compact_block.header, transactions: final_txs });
+                                                    block_tracker.on_block_saved(&actual_block_hash);
                                                     responder_str = responder;
                                                 } else {
                                                     pending_compact_blocks.insert(actual_block_hash, (compact_block, partial_map));
@@ -2967,6 +3016,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     }
 
                                                     fully_assembled_blocks.push(Block { header: cb.header, transactions: final_txs });
+                                                    block_tracker.on_block_saved(&block_hash);
                                                     responder_str = responder;
                                                 } else { continue; }
                                             }
@@ -3559,35 +3609,30 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     }
                                 }
                             }
-                            //  Precise timeout failure rollback to prevent Cache Flush Exploits.
+                            // Precise timeout failure rollback to prevent Cache Flush Exploits.
                             libp2p::request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
                                 tracing::warn!("[WARN] Network: ReqResp outbound failure to {}: {:?}. Releasing tracker lock.", peer, error);
                                 if let Some(failed_hash) = active_req_map.remove(&request_id) {
                                     in_flight_txs.remove(&failed_hash);
-                                    // Retain in queue to naturally age out, allowing immediate retry for this specific transaction.
                                 }
 
-                                // FIX: Broad Network Failure Amnesty and Guarded Dynamic Fallback.
-                                // Catches Timeouts and aggressive TCP Connection Resets.
-                                // Triggers non-blocking Headers-First fallback to prevent state machine stalling.
-                                match error {
-                                    libp2p::request_response::OutboundFailure::UnsupportedProtocols => {}
-                                    _ => {
-                                        let current_chain_len = storage.get_chain_list().len() as u64;
-                                        if current_chain_len < 1000 {
-                                            if !FALLBACK_GUARD.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                                                tracing::warn!("[DEFENSE] Network failure to {} ({:?}). Amnesty granted. Guarded Fallback scheduled.", peer, error);
-                                                let sos_tx_clone = sos_tx.clone();
-                                                tokio::spawn(async move {
-                                                    tokio::time::sleep(tokio::time::Duration::from_secs(3)).await;
-                                                    let _ = sos_tx_clone.try_send((0, None));
-                                                    FALLBACK_GUARD.store(false, std::sync::atomic::Ordering::SeqCst);
-                                                });
-                                            }
-                                        } else {
-                                            tracing::debug!("[DEFENSE] Network failure to {} ignored to prevent Headers-Trap deadlock.", peer);
-                                        }
+                                // Deterministic state machine failover on stream reset or timeout
+                                match block_tracker.on_network_failure(&request_id) {
+                                    TrackerAction::FetchFullBlock { peer: target_peer, hash } => {
+                                        sync_debouncer.in_flight.remove(&hash);
+                                        let fallback_req = crate::network::SyncRequest::GetData {
+                                            hashes: vec![hash],
+                                            requester: local_peer_id.to_string(),
+                                            mode: crate::network::SyncMode::Full,
+                                        };
+                                        let new_req_id = swarm.behaviour_mut().req_resp.send_request(&target_peer, fallback_req);
+                                        block_tracker.register_full_request(new_req_id, hash);
                                     }
+                                    TrackerAction::RescueSync { peer: target_peer } => {
+                                        let current_index = storage.get_chain_list().len();
+                                        let _ = sos_tx.try_send((current_index, Some(target_peer)));
+                                    }
+                                    _ => {}
                                 }
                             }
                             _ => {}
