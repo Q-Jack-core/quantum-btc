@@ -58,11 +58,52 @@ $env:QBTC_MINER_BACKEND = "cuda"
 .\target\release\quantum-btc.exe --datadir .\qbtc_data --port 8000
 ```
 
+`Start_Mining_GPU.bat` and `Start_Mining_GPU.command` do this for you, next
+to the equivalent CPU launchers. They set the backend, clear any stale tuning
+overrides, and tell you what to look for once mining starts.
+
 On startup the miner reports which devices it is using:
 
 ```
 [INFO] Miner: CUDA device 0 ready: NVIDIA GeForce GTX 1060 3GB
 [INFO] Miner: mining on 1 GPU(s): [0]
+```
+
+## Watching it run
+
+Each device reports progress every two seconds, in the console and in the
+node's log file:
+
+```
+[MINING] GPU0 progress: 7700000000 hashes total | 784.5 MH/s | elapsed 362s | nonce=7800000000 | last_batch=0.127s
+```
+
+`last_batch` is the wall time of a single kernel invocation, including the
+synchronise wait rather than pure kernel time. It is a useful baseline if you
+are weighing up whether async streams would pay off, since the waste per
+launch transition scales with it.
+
+To follow it from another window, or to filter down to just the hashrate:
+
+```sh
+# Linux / macOS
+tail -f logs/qbtc_node.log.$(date +%F)
+tail -f logs/qbtc_node.log.$(date +%F) | grep --line-buffered MINING
+```
+
+```powershell
+# Windows
+$log = (Get-ChildItem .\logs\qbtc_node.log.* | Sort-Object Name | Select-Object -Last 1).FullName
+Get-Content -Wait -Tail 20 $log
+Get-Content -Wait $log | Select-String MINING
+```
+
+The file name carries a date suffix because the log rotates daily.
+
+To check which devices came up without waiting for a progress line:
+
+```sh
+grep 'CUDA device' logs/qbtc_node.log.$(date +%F)
 ```
 
 ## Multiple GPUs
