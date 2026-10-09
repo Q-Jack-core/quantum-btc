@@ -2819,8 +2819,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                 }
                                             }
                                                 // Engine A (IBD): Tactical chunking mechanism.
-                                                //  Throttle IBD greediness to 50 blocks to lockstep with UTXO crypto-validation.
-                                                let chunk_to_fetch: Vec<[u8; 32]> = hashes_to_fetch.into_iter().take(50).collect();
+                                            //  Throttle IBD greediness to 50 blocks to lockstep with UTXO crypto-validation.
+                                            let chunk_to_fetch: Vec<[u8; 32]> = hashes_to_fetch.into_iter().take(50).collect();
+                                            if !chunk_to_fetch.is_empty() {
                                                 let req = crate::network::SyncRequest::GetData {
                                                     hashes: chunk_to_fetch,
                                                     requester: local_peer_id.to_string(),
@@ -2828,6 +2829,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     mode: crate::network::SyncMode::Full
                                                 };
                                                 let _ = swarm.behaviour_mut().req_resp.send_request(&peer, req);
+                                            }
 
                                             continue;
                                         }

@@ -56,3 +56,4 @@ wallet.dat
 .qbtc_data/
 logs/
 target/
+explorer/
