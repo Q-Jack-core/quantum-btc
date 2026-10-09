@@ -1,4 +1,9 @@
 // src/miner.rs
+//
+// The multi-core CPU coordinator-worker pool, plus an optional CUDA
+// backend selected with QBTC_MINER_BACKEND. The CPU path is unchanged by
+// default; GPU mining is opt-in and falls back to CPU whenever no usable
+// device is present.
 
 use crate::block::Block;
 use crate::transaction::Transaction;
@@ -132,6 +137,7 @@ pub static IS_SIGNING: AtomicBool = AtomicBool::new(false);
 pub static PENDING_CMD: AtomicBool = AtomicBool::new(false);
 
 // Data packet encapsulating all necessary parameters for mining a block.
+#[derive(Clone)]
 pub struct BlockTemplate {
     pub previous_hash: [u8; 32],
     pub transactions: Vec<Transaction>,
@@ -140,6 +146,9 @@ pub struct BlockTemplate {
 }
 
 // Communication protocol between Tokio main thread and Daemon.
+// Clone: the Hybrid backend relays every command to both the CPU and CUDA
+// sub-daemons over two independent channels.
+#[derive(Clone)]
 pub enum MinerCommand {
     Mine(BlockTemplate),
     Stop,
@@ -155,11 +164,90 @@ macro_rules! miner_log {
     };
 }
 
+// ---- Backend selection ---------------------------------------------
+#[derive(Debug, Clone, PartialEq)]
+enum MinerBackend {
+    Cpu,
+    Cuda,
+    // Runs the CPU coordinator-worker pool and the CUDA daemon at the same
+    // time against the same block template, so idle CPU cores contribute
+    // hashrate alongside the GPU instead of sitting unused.
+    Hybrid,
+}
+
+impl MinerBackend {
+    fn from_env() -> Self {
+        match std::env::var("QBTC_MINER_BACKEND")
+            .unwrap_or_default()
+            .to_lowercase()
+            .as_str()
+        {
+            "cuda" | "gpu" => MinerBackend::Cuda,
+            "hybrid" | "both" | "cpu+gpu" => MinerBackend::Hybrid,
+            _ => MinerBackend::Cpu,
+        }
+    }
+}
+
 pub struct Miner;
 
 impl Miner {
     
+    // Miner daemon entry point. QBTC_MINER_BACKEND picks the backend:
+    // cpu (multi-core, the default), cuda, or hybrid.
     pub fn start_daemon(
+        cmd_rx: Receiver<MinerCommand>,
+        result_tx: Sender<Block>,
+    ) {
+        let backend = MinerBackend::from_env();
+        match backend {
+            MinerBackend::Cuda => {
+                miner_log!("[INFO] Miner: CUDA backend selected");
+                Self::run_cuda_daemon(cmd_rx, result_tx);
+            }
+            MinerBackend::Cpu => {
+                miner_log!("[INFO] Miner: CPU backend selected");
+                Self::run_multicore_cpu_daemon(cmd_rx, result_tx);
+            }
+            MinerBackend::Hybrid => {
+                miner_log!("[INFO] Miner: Hybrid CPU+GPU backend selected");
+                // Fan the same command stream out to two independent
+                // channels so the CPU pool and the CUDA daemon each see
+                // every Mine/Stop/Shutdown exactly like a solo backend would.
+                let (cpu_cmd_tx, cpu_cmd_rx) = crossbeam_channel::unbounded::<MinerCommand>();
+                let (gpu_cmd_tx, gpu_cmd_rx) = crossbeam_channel::unbounded::<MinerCommand>();
+                std::thread::spawn(move || {
+                    while let Ok(cmd) = cmd_rx.recv() {
+                        let is_shutdown = matches!(cmd, MinerCommand::Shutdown);
+                        let _ = cpu_cmd_tx.send(cmd.clone());
+                        let _ = gpu_cmd_tx.send(cmd);
+                        if is_shutdown { break; }
+                    }
+                });
+                // CPU pool spawns its own coordinator/worker threads and
+                // returns immediately -- safe to start first.
+                Self::run_multicore_cpu_daemon(cpu_cmd_rx, result_tx.clone());
+                // GPU threads already use a per-thread nonce offset of
+                // thread_id * 1_000_000_000_000_000 (see below); the CUDA
+                // scan starts at nonce 0, same as CPU thread 0, but at
+                // 200+ MH/s the GPU clears that low range in a fraction of
+                // a second while a single CPU thread would take years to
+                // reach it -- the overlap is negligible, and every other
+                // CPU thread's range is already exclusive of the GPU's.
+                let devices = crate::gpu_miner::cuda_init_all();
+                if !devices.is_empty() {
+                    Self::run_cuda_daemon_loop_on(gpu_cmd_rx, result_tx, devices);
+                } else {
+                    miner_log!("[WARN] Miner: Hybrid mode requested but CUDA initialization failed. Continuing CPU-only.");
+                }
+            }
+        }
+    }
+
+    // ---- CPU daemon: the multi-core coordinator-worker pool ---------
+    // Initiates the dynamic multi-core Proof-of-Work daemon thread pool.
+    // Utilizes a Coordinator-Worker architecture with absolute mathematical isolation.
+    fn run_multicore_cpu_daemon(
         cmd_rx: Receiver<MinerCommand>,
         result_tx: Sender<Block>,
     ) {
@@ -327,6 +415,114 @@ impl Miner {
                     }
                 }
             });
+        }
+    }
+
+    // ---- CUDA daemon ------------------------------------------------
+    fn run_cuda_daemon(
+        cmd_rx: Receiver<MinerCommand>,
+        result_tx: Sender<Block>,
+    ) {
+        use crate::gpu_miner::cuda_init_all;
+
+        // Bring up every visible GPU; fall back to CPU if none comes up.
+        // QBTC_CUDA_DEVICES=0,1 restricts mining to a subset of devices.
+        let devices = cuda_init_all();
+        if devices.is_empty() {
+            miner_log!("[WARN] Miner: CUDA initialization failed. Falling back to CPU backend.");
+            Self::run_multicore_cpu_daemon(cmd_rx, result_tx);
+            return;
+        }
+        miner_log!("[INFO] Miner: CUDA backend running on {} device(s).", devices.len());
+
+        Self::run_cuda_daemon_loop_on(cmd_rx, result_tx, devices);
+    }
+
+    // The actual GPU command loop, split out from run_cuda_daemon() so the
+    // Hybrid backend can reuse it after doing its own cuda_init() check --
+    // calling cuda_init() twice would re-cudaMalloc the persistent device
+    // buffers and leak the first set.
+    fn run_cuda_daemon_loop_on(
+        cmd_rx: Receiver<MinerCommand>,
+        result_tx: Sender<Block>,
+        devices: Vec<i32>,
+    ) {
+        use crate::gpu_miner::{cuda_shutdown, GpuBlockData, run_gpu_mine_loop_on};
+
+        // One stop channel and one thread handle per device.
+        let mut gpu_stops: Vec<crossbeam_channel::Sender<()>> = Vec::new();
+        let mut gpu_threads: Vec<std::thread::JoinHandle<()>> = Vec::new();
+
+        // Signal every running GPU job to stop, then reap the threads.
+        macro_rules! halt_all {
+            () => {{
+                for tx in gpu_stops.drain(..) { let _ = tx.send(()); }
+                for h in gpu_threads.drain(..) { let _ = h.join(); }
+            }};
+        }
+
+        loop {
+            // Blocking receive.
+            match cmd_rx.recv() {
+                Ok(cmd) => {
+                    match cmd {
+                        MinerCommand::Mine(template) => {
+                            // A new template supersedes the old one: stop
+                            // and join every in-flight GPU job first.
+                            halt_all!();
+
+                            miner_log!("[INFO] Miner: Starting Proof-of-Work for block height {}.", template.current_height + 1);
+                            miner_log!("[INFO] Miner: Target threshold set to {}.", template.target);
+
+                            let gpu_data = GpuBlockData::from_template(
+                                template.previous_hash,
+                                template.transactions,
+                                template.target,
+                            );
+
+                            // One independent thread per device. Each walks
+                            // its own disjoint set of nonce batches at its
+                            // own pace, so mixed hardware needs no
+                            // coordination -- a slower card simply completes
+                            // fewer batches and never holds a faster one back.
+                            let device_count = devices.len() as u64;
+                            for (slot, dev) in devices.iter().copied().enumerate() {
+                                let (stop_tx, stop_rx) = crossbeam_channel::bounded::<()>(1);
+                                let result_tx_clone = result_tx.clone();
+                                let data = gpu_data.clone();
+                                let handle = std::thread::spawn(move || {
+                                    run_gpu_mine_loop_on(
+                                        dev,
+                                        slot as u64,
+                                        device_count,
+                                        data,
+                                        result_tx_clone,
+                                        stop_rx,
+                                    );
+                                });
+                                gpu_stops.push(stop_tx);
+                                gpu_threads.push(handle);
+                            }
+                        }
+                        MinerCommand::Stop => {
+                            halt_all!();
+                            miner_log!("[INFO] Miner: Interrupt signal received. Engine suspended.");
+                        }
+                        MinerCommand::Shutdown => {
+                            halt_all!();
+                            miner_log!("[INFO] Miner: Shutdown signal received. Breaking compute loop.");
+                            cuda_shutdown();
+                            return;
+                        }
+                    }
+                }
+                Err(_) => {
+                    // Command channel closed: shut down.
+                    halt_all!();
+                    cuda_shutdown();
+                    return;
+                }
+            }
         }
     }
 }
