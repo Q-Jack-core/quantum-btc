@@ -203,7 +203,10 @@ impl Miner {
         match backend {
             MinerBackend::Cuda => {
                 miner_log!("[INFO] Miner: CUDA backend selected");
-                Self::run_cuda_daemon(cmd_rx, result_tx);
+                // The GPU command loop blocks forever, so it owns a thread of
+                // its own. start_daemon() has to return for main() to go on to
+                // the P2P and block sync startup that follows it.
+                std::thread::spawn(move || Self::run_cuda_daemon(cmd_rx, result_tx));
             }
             MinerBackend::Cpu => {
                 miner_log!("[INFO] Miner: CPU backend selected");
@@ -224,8 +227,8 @@ impl Miner {
                         if is_shutdown { break; }
                     }
                 });
-                // CPU pool spawns its own coordinator/worker threads and
-                // returns immediately -- safe to start first.
+                // The CPU pool spawns its own coordinator/worker threads and
+                // returns immediately.
                 Self::run_multicore_cpu_daemon(cpu_cmd_rx, result_tx.clone());
                 // GPU threads already use a per-thread nonce offset of
                 // thread_id * 1_000_000_000_000_000 (see below); the CUDA
@@ -234,12 +237,16 @@ impl Miner {
                 // a second while a single CPU thread would take years to
                 // reach it -- the overlap is negligible, and every other
                 // CPU thread's range is already exclusive of the GPU's.
-                let devices = crate::gpu_miner::cuda_init_all();
-                if !devices.is_empty() {
-                    Self::run_cuda_daemon_loop_on(gpu_cmd_rx, result_tx, devices);
-                } else {
-                    miner_log!("[WARN] Miner: Hybrid mode requested but CUDA initialization failed. Continuing CPU-only.");
-                }
+                // Same as the solo CUDA arm: the loop blocks, so it gets its
+                // own thread and start_daemon() returns to the caller.
+                std::thread::spawn(move || {
+                    let devices = crate::gpu_miner::cuda_init_all();
+                    if !devices.is_empty() {
+                        Self::run_cuda_daemon_loop_on(gpu_cmd_rx, result_tx, devices);
+                    } else {
+                        miner_log!("[WARN] Miner: Hybrid mode requested but CUDA initialization failed. Continuing CPU-only.");
+                    }
+                });
             }
         }
     }
@@ -471,7 +478,7 @@ impl Miner {
                             // and join every in-flight GPU job first.
                             halt_all!();
 
-                            miner_log!("[INFO] Miner: Starting Proof-of-Work for block height {}.", template.current_height + 1);
+                            miner_log!("[INFO] Miner: Starting Proof-of-Work for block height {}.", template.current_height);
                             miner_log!("[INFO] Miner: Target threshold set to {}.", template.target);
 
                             let gpu_data = GpuBlockData::from_template(
