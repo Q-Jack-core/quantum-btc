@@ -85,9 +85,33 @@ auto_mine start mywallet
 ```
 You will see the node begin processing hash iterations immediately. Your computer is now actively securing the Q-BTC network!
 
-### Option C: Stratum Pool Mining (For Advanced Hash Farms)
-If you are operating a large-scale mining farm and wish to aggregate hash power via the Stratum protocol, please refer to our dedicated mining pool gateway repository for deployment instructions:
-👉 [Q-BTC Stratum Pool Infrastructure](https://github.com/Q-Jack-core/qbtc-stratum-pool)
+### Option C: Official Stratum Pool Mining (Recommended for Hash Power Sharing)
+
+With network hashrate surpassing 6+ GH/s, solo mining on individual CPUs/GPUs may take a long time to find blocks. We recommend pointing your miners to our official reference stratum pool for steady, share-based rewards.
+
+- **Stratum Endpoint:** `stratum+tcp://144.172.110.193:3334` (Vardiff enabled)
+- **Pool Stats & Hashrate:** [http://144.172.110.193:3335/api/stats](http://144.172.110.193:3335/api/stats)
+- **Dev Fee:** 0% (Strictly cypherpunk fair-launch)
+
+#### Quick Connect Examples:
+
+**Linux / macOS Terminal:**
+```bash
+./quantum-btc --stratum stratum+tcp://144.172.110.193:3334 --address YOUR_QBTC_ADDRESS --threads 4
+```
+
+**Windows Command Prompt:**
+```bat
+quantum-btc.exe --stratum stratum+tcp://144.172.110.193:3334 --address YOUR_QBTC_ADDRESS --threads 4
+```
+
+*(Note: Replace `YOUR_QBTC_ADDRESS` with your address generated via Desktop GUI or `wallet_gen`).*
+
+---
+
+### 🌐 Open Source Stratum Gateway Infrastructure
+For pool operators and enterprise farms wanting to deploy their own stratum nodes:
+👉 [Q-BTC Stratum Pool Gateway Repository](https://github.com/Q-Jack-core/qbtc-stratum-pool)
 
 ---
 
