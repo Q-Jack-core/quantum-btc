@@ -19,9 +19,14 @@ pub const MAX_TEMPLATE_BLOCK_BYTES: usize = 4_500_000;
 pub const MAX_WALLET_TX_BYTES: u64 = 2_500_000;
 
 // Height from which blocks must commit to their witnesses via
-// commit_merkle_root. Disabled (u64::MAX) until an activation height is
-// chosen after checking that every historical block already satisfies it.
-pub const WITNESS_COMMITMENT_ACTIVATION_HEIGHT: u64 = 25_000;
+// commit_merkle_root. Enforced on every block-entry path: gossip, deep sync
+// and /api/submit_block. Blocks below this height are not checked, so the
+// rule needs no historical audit; it only has to activate far enough ahead
+// that every node on the network is running code that enforces it on all
+// three paths. Chain height was 24,650 on 2026-10-14, which is 5,350 blocks
+// below this value: about 37 days at the 600 s target, 19 days if blocks
+// come in at 300 s.
+pub const WITNESS_COMMITMENT_ACTIVATION_HEIGHT: u64 = 30_000;
 
 // Maximum allowable Signature Operations per block.
 pub const MAX_BLOCK_SIGOPS: u32 = 80_000;
