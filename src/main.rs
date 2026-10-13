@@ -2588,7 +2588,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         let mut payload_size = 0;
 
                                                         for hash in safe_hashes {
-                                                            if let Some(block) = storage_clone.get_block_by_hash(&hash, is_core_only) {
+                                                            // CoreOnly strips witnesses, which is only sound below the
+                                                            // witness commitment activation height. At or above it the
+                                                            // witnesses are consensus-bound, so a stripped block cannot
+                                                            // pass validation and serving one would stall the requester.
+                                                            // An unknown height falls back to serving the full block.
+                                                            let strip_witnesses = is_core_only
+                                                                && storage_clone
+                                                                    .get_block_index(&hash)
+                                                                    .map(|idx| {
+                                                                        idx.height
+                                                                            < quantum_btc::config::WITNESS_COMMITMENT_ACTIVATION_HEIGHT
+                                                                    })
+                                                                    .unwrap_or(false);
+
+                                                            if let Some(block) = storage_clone.get_block_by_hash(&hash, strip_witnesses) {
                                                                 let size = block.get_physical_size();
 
                                                                 //  Absolute progression logic.
