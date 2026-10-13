@@ -3202,7 +3202,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         && consensus::ConsensusEngine::verify_proof_of_work(b, b.header.target),
                                                 };
 
-                                                if !pow_valid || !consensus::ConsensusEngine::verify_merkle_root(b) {
+                                                let witness_valid = eval_height
+                                                    < quantum_btc::config::WITNESS_COMMITMENT_ACTIVATION_HEIGHT
+                                                    || consensus::ConsensusEngine::verify_witness_commitment(b);
+
+                                                if !pow_valid
+                                                    || !consensus::ConsensusEngine::verify_merkle_root(b)
+                                                    || !witness_valid
+                                                {
                                                     tracing::error!("[ERROR] Sync: Cryptographic validation failed. Halting assembly.");
                                                     if let Ok(bad_peer) = responder_str.parse::<libp2p::PeerId>() {
                                                         let _ = safe_lock!(reputation_clone).report_offense(&bad_peer, NetworkOffense::InvalidHeader);
