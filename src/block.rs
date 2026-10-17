@@ -89,13 +89,12 @@ impl BlockHeader {
 
 impl BlockIndex {
     // Constructor for secure tree node initialization.
-    pub fn new(block_hash: [u8; 32], header: BlockHeader, height: u64, parent_work: u128, has_data: bool) -> Self {
-        let block_work = header.get_block_proof();
+    pub fn new(block_hash: [u8; 32], header: BlockHeader, height: u64, chain_work: u128, has_data: bool) -> Self {
         Self {
             block_hash,
             header,
             height,
-            chain_work: parent_work + block_work,
+            chain_work,
             has_data,
         }
     }

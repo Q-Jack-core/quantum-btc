@@ -2490,7 +2490,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                     let in_ibd = current_physical_time.saturating_sub(safe_lock!(latest_block).header.timestamp) > 86400;
                                     let expected_target = current_target.load(Ordering::Relaxed);
                                     if !in_ibd && expected_target > 0 && header.target > expected_target.saturating_mul(4) {
-                                        tracing::warn!("[WARN] Firewall: BlockAnnouncement target far above the current requirement. Ignored.");
+                                        tracing::debug!("[WARN] Firewall: BlockAnnouncement target far above the current requirement. Ignored.");
                                         continue;
                                     }
 
@@ -2588,7 +2588,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         let mut payload_size = 0;
 
                                                         for hash in safe_hashes {
-                                                            if let Some(block) = storage_clone.get_block_by_hash(&hash, is_core_only) {
+                                                            // CoreOnly strips witnesses, which is only sound below the
+                                                            // witness commitment activation height. At or above it the
+                                                            // witnesses are consensus-bound, so a stripped block cannot
+                                                            // pass validation and serving one would stall the requester.
+                                                            // An unknown height falls back to serving the full block.
+                                                            let strip_witnesses = is_core_only
+                                                                && storage_clone
+                                                                    .get_block_index(&hash)
+                                                                    .map(|idx| {
+                                                                        idx.height
+                                                                            < quantum_btc::config::WITNESS_COMMITMENT_ACTIVATION_HEIGHT
+                                                                    })
+                                                                    .unwrap_or(false);
+
+                                                            if let Some(block) = storage_clone.get_block_by_hash(&hash, strip_witnesses) {
                                                                 let size = block.get_physical_size();
 
                                                                 //  Absolute progression logic.
@@ -3144,6 +3158,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                         network_tasks.spawn(async move {
                                             let next_request = tokio::task::spawn_blocking(move || -> Option<(libp2p::PeerId, crate::network::SyncRequest)> {
                                                 let mut current_latest = safe_lock!(latest_block_clone);
+                                                let mut progress_made = false;
 
                                             // L1 V2.0 CORE: Step 1. Append to absolute truth tree (map_block_index) without corrupting active_chain.
                                             let mut highest_new_hash = None;
@@ -3163,7 +3178,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     idx.height + 1
                                                 } else {
                                                     tracing::warn!("[WARN] Sync: Orphan block detected in direct pipeline. Quarantining to Orphan Pool.");
-                                                    let _ = storage_clone.add_orphan_block(b.clone());
+                                                    if storage_clone.add_orphan_block(b.clone()) { progress_made = true; }
                                                     continue;
                                                 };
 
@@ -3202,7 +3217,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                         && consensus::ConsensusEngine::verify_proof_of_work(b, b.header.target),
                                                 };
 
-                                                if !pow_valid || !consensus::ConsensusEngine::verify_merkle_root(b) {
+                                                let witness_valid = eval_height
+                                                    < quantum_btc::config::WITNESS_COMMITMENT_ACTIVATION_HEIGHT
+                                                    || consensus::ConsensusEngine::verify_witness_commitment(b);
+
+                                                if !pow_valid
+                                                    || !consensus::ConsensusEngine::verify_merkle_root(b)
+                                                    || !witness_valid
+                                                {
                                                     tracing::error!("[ERROR] Sync: Cryptographic validation failed. Halting assembly.");
                                                     if let Ok(bad_peer) = responder_str.parse::<libp2p::PeerId>() {
                                                         let _ = safe_lock!(reputation_clone).report_offense(&bad_peer, NetworkOffense::InvalidHeader);
@@ -3479,6 +3501,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     }
                                                     // Step 6: Finalize switch to superior chain.
                                                     if reorg_success {
+                                                            progress_made = true;
                                                         //  FIX: Topology-Aware Async Snapshot Reconciliation
                                                         /*  Mempool Poisoning Defense.
                                                            If the Reorg is deeper than 10 blocks, Coinbase maturities and physical UTXO
@@ -3552,7 +3575,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             let vault_guard = storage_clone.vault.read().unwrap();
                                             let tree = &vault_guard.map_block_index;
 
-                                            if let Some(best_idx) = tree.values().max_by_key(|idx| idx.chain_work) {
+                                            if let Some(best_idx) = tree.values().max_by_key(|idx| (idx.chain_work, std::cmp::Reverse(idx.block_hash))) {
                                                 let mut path = Vec::new();
                                                 let mut curr_hash = best_idx.block_hash;
 
@@ -3576,8 +3599,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     if let Ok(peer_id) = responder_str.parse::<libp2p::PeerId>() {
                                                         return Some((peer_id, next_req));
                                                     }
-                                                } else if !blocks.is_empty() {
-                                                    let chain = storage_clone.get_chain_list();
+                                                } else if progress_made {
+                                                            let chain = storage_clone.get_chain_list();
                                                     let mut locator_hashes = Vec::new();
                                                     let mut step = 1;
                                                     let mut index = chain.len() as i32 - 1;

@@ -766,6 +766,10 @@ async fn api_submit_block(State(state): State<RpcState>, Json(req): Json<SubmitB
     if !crate::consensus::ConsensusEngine::verify_merkle_root(&block) {
         return Json(ApiResponse { success: false, message: "Rejected: merkle root mismatch".to_string(), tx_hash: None });
     }
+    if current_height >= crate::config::WITNESS_COMMITMENT_ACTIVATION_HEIGHT
+        && !crate::consensus::ConsensusEngine::verify_witness_commitment(&block) {
+        return Json(ApiResponse { success: false, message: "Rejected: witness commitment mismatch".to_string(), tx_hash: None });
+    }
     let past_timestamps: Vec<u64> = {
         let chain = state.storage.get_chain_list();
         let mut ts: Vec<u64> = chain.iter().rev().take(11)
