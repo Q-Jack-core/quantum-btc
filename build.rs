@@ -115,43 +115,106 @@ fn build_cuda_kernel(out_dir: &str, cuda_path: &str) -> Result<(), String> {
     let target = env::var("TARGET").unwrap_or_default();
     let mut nvcc_cmd = Command::new(&nvcc);
 
+    let mut cl_env = Vec::new();
     if windows {
         // nvcc shells out to cl.exe as its host compiler, and the archiving
         // step below needs lib.exe. Neither is on PATH in a plain cmd.exe or
         // PowerShell window, so borrow the environment the `cc` crate itself
         // would use instead of requiring a Developer Command Prompt.
         if let Some(t) = cc::windows_registry::find_tool(&target, "cl.exe") {
-            for (k, v) in t.env() {
+            cl_env = t.env().to_vec();
+            for (k, v) in &cl_env {
                 nvcc_cmd.env(k, v);
             }
         }
     }
+
+    let help_text = Command::new(&nvcc)
+        .envs(cl_env.iter().cloned())
+        .arg("--help")
+        .output()
+        .ok()
+        .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+        .unwrap_or_default();
+
+    let mut supported_archs: Vec<u32> = Command::new(&nvcc)
+        .envs(cl_env.iter().cloned())
+        .arg("--list-gpu-arch")
+        .output()
+        .ok()
+        .filter(|o| o.status.success())
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .lines()
+                .filter_map(|line| line.trim().strip_prefix("compute_")?.parse::<u32>().ok())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    if supported_archs.is_empty() && !help_text.is_empty() {
+        for token in help_text.split(|c: char| !c.is_ascii_alphanumeric() && c != '_') {
+            if let Some(num_str) = token.strip_prefix("compute_") {
+                if let Ok(arch) = num_str.parse::<u32>() {
+                    if !supported_archs.contains(&arch) {
+                        supported_archs.push(arch);
+                    }
+                }
+            }
+        }
+        supported_archs.sort_unstable();
+    }
+
+    // Pascal (61), Volta (70), Turing (75), Ampere (80/86), Ada (89), Hopper (90), Blackwell (120).
+    let desired_archs = [61u32, 70, 75, 80, 86, 89, 90, 120];
+    let active_archs: Vec<u32> = if supported_archs.is_empty() {
+        vec![61, 75, 86]
+    } else {
+        let filtered: Vec<u32> = desired_archs
+            .iter()
+            .copied()
+            .filter(|a| supported_archs.contains(a))
+            .collect();
+        if filtered.is_empty() { vec![61, 75, 86] } else { filtered }
+    };
 
     nvcc_cmd.args([
         "cuda/qbtc_sha256_miner.cu",
         "-c",
         "-o",
         &obj.to_string_lossy(),
-        // Pascal, Turing and Ampere as real SASS, plus PTX so newer
-        // architectures still run via JIT.
-        "--generate-code",
-        "arch=compute_61,code=sm_61",
-        "--generate-code",
-        "arch=compute_75,code=sm_75",
-        "--generate-code",
-        "arch=compute_86,code=sm_86",
-        "--generate-code",
-        "arch=compute_86,code=compute_86",
         "-O3",
     ]);
 
+    if help_text.is_empty() || help_text.contains("Wno-deprecated-gpu-targets") {
+        nvcc_cmd.arg("-Wno-deprecated-gpu-targets");
+    }
+    if windows || help_text.contains("allow-unsupported-compiler") {
+        nvcc_cmd.arg("-allow-unsupported-compiler");
+    }
+
+    for arch in &active_archs {
+        nvcc_cmd.args([
+            "--generate-code",
+            &format!("arch=compute_{0},code=sm_{0}", arch),
+        ]);
+    }
+    if let Some(&min_arch) = active_archs.first() {
+        nvcc_cmd.args([
+            "--generate-code",
+            &format!("arch=compute_{0},code=compute_{0}", min_arch),
+        ]);
+    }
+    if let Some(&max_arch) = active_archs.last() {
+        if Some(&max_arch) != active_archs.first() {
+            nvcc_cmd.args([
+                "--generate-code",
+                &format!("arch=compute_{0},code=compute_{0}", max_arch),
+            ]);
+        }
+    }
+
     if windows {
         nvcc_cmd.args(["-Xcompiler", "/MD"]);
-        // nvcc version-gates its host compiler (host_config.h, C1189) and
-        // rejects MSVC toolsets newer than the one it shipped with, even for
-        // code as plain as this. nvcc's own error names this flag as the
-        // sanctioned override.
-        nvcc_cmd.arg("-allow-unsupported-compiler");
     } else {
         nvcc_cmd.args(["-Xcompiler", "-fPIC"]);
     }
@@ -200,7 +263,7 @@ fn build_cuda_kernel(out_dir: &str, cuda_path: &str) -> Result<(), String> {
             return Err(format!("{} failed: {}", ar, status));
         }
         // lib64 on most distributions, lib on a few.
-        for sub in ["lib64", "lib"] {
+        for sub in ["lib64", "lib", "lib/x86_64-linux-gnu"] {
             let dir = Path::new(cuda_path).join(sub);
             if dir.exists() {
                 println!("cargo:rustc-link-search=native={}", dir.display());

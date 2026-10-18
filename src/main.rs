@@ -589,6 +589,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         ),
         //  Report valid progress to the Debouncer.
         ReportSyncProgress(libp2p::PeerId),
+        RetryFullBlock(libp2p::PeerId, [u8; 32]),
     }
     let (swarm_cmd_tx, mut swarm_cmd_rx) = tokio::sync::mpsc::channel::<SwarmCommand>(1024);
     let swarm_cmd_tx_worker = swarm_cmd_tx.clone();
@@ -2295,6 +2296,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     SwarmCommand::ReportSyncProgress(peer_id) => {
                         sync_debouncer.report_peer_progress(&peer_id.to_string(), true, current_vtime);
                     }
+                    SwarmCommand::RetryFullBlock(peer_id, hash) => {
+                        if block_tracker.is_in_flight(&hash) && storage.get_block_index(&hash).map_or(true, |idx| !idx.has_data) {
+                            sync_debouncer.in_flight.remove(&hash);
+                            let fallback_req = crate::network::SyncRequest::GetData {
+                                hashes: vec![hash],
+                                requester: local_peer_id.to_string(),
+                                mode: crate::network::SyncMode::Full,
+                            };
+                            let new_req_id = swarm.behaviour_mut().req_resp.send_request(&peer_id, fallback_req);
+                            block_tracker.register_full_request(new_req_id, hash);
+                        }
+                    }
                     SwarmCommand::SendSyncReq(peer_id, req, tracker_hash) => {
                         // MAINNET: Load Shedding without Connection Teardown.
                         if sync_debouncer.is_peer_banned(&peer_id.to_string(), current_vtime) {
@@ -2869,8 +2882,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                             block_tracker.register_full_request(new_req_id, hash);
                                                         }
                                                         TrackerAction::RescueSync { peer: target_peer } => {
-                                                            let current_index = storage.get_chain_list().len();
-                                                            let _ = sos_tx.try_send((current_index, Some(target_peer)));
+                                                            let tip_before = safe_lock!(latest_block).calculate_hash();
+                                                            let latest_check = latest_block.clone();
+                                                            let storage_check = storage.clone();
+                                                            let sos_tx_delayed = sos_tx.clone();
+                                                            network_tasks.spawn(async move {
+                                                                tokio::time::sleep(tokio::time::Duration::from_millis(2000)).await;
+                                                                if safe_lock!(latest_check).calculate_hash() == tip_before {
+                                                                    let current_index = storage_check.get_chain_list().len();
+                                                                    let _ = sos_tx_delayed.try_send((current_index, Some(target_peer)));
+                                                                }
+                                                            });
                                                         }
                                                         TrackerAction::None => {
                                                             if let Ok(peer_id) = responder.parse::<libp2p::PeerId>() {
@@ -2891,18 +2913,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                             crate::network::SyncResponse::CompactBlockResponse { compact_block: cb_opt, responder } => {
 
                                                 if cb_opt.is_none() {
-                                                    // Immediate deterministic failover without sleep timers or global locks
+                                                    // Deterministic staggered failover: give relay peer 300ms to finish block verification
                                                     match block_tracker.on_compact_failed(&request_id) {
                                                         TrackerAction::FetchFullBlock { peer, hash } => {
-                                                            sync_debouncer.in_flight.remove(&hash);
                                                             tracing::warn!("[WARN] Sync: Peer {} is verifying block. Retrying target block...", responder);
-                                                            let fallback_req = crate::network::SyncRequest::GetData {
-                                                                hashes: vec![hash],
-                                                                requester: local_peer_id.to_string(),
-                                                                mode: crate::network::SyncMode::Full
-                                                            };
-                                                            let new_req_id = swarm.behaviour_mut().req_resp.send_request(&peer, fallback_req);
-                                                            block_tracker.register_full_request(new_req_id, hash);
+                                                            let cmd_tx = swarm_cmd_tx.clone();
+                                                            network_tasks.spawn(async move {
+                                                                tokio::time::sleep(tokio::time::Duration::from_millis(1200)).await;
+                                                                let _ = cmd_tx.try_send(SwarmCommand::RetryFullBlock(peer, hash));
+                                                            });
                                                         }
                                                         TrackerAction::RescueSync { peer } => {
                                                             let current_index = storage.get_chain_list().len();
@@ -3493,7 +3512,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
                                                         if let Some(final_hash) = connect_path.last() {
                                                             if let Some(final_block) = storage_clone.get_block_by_hash(final_hash, false) {
-                                                                *current_latest = final_block;
+                                                                *current_latest = final_block.clone();
+                                                                let mut cache = BLOCK_RELAY_CACHE.write().unwrap();
+                                                                if cache.len() >= 10 {
+                                                                    cache.remove(0);
+                                                                }
+                                                                cache.push(final_block);
                                                             }
                                                         }
                                                     } else {

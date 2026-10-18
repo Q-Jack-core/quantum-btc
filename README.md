@@ -148,6 +148,7 @@ Q-BTC is a fundamental architectural redesign optimized for the post-quantum era
 ### Prerequisites
 - Rust toolchain (cargo 1.75+)
 - CMake & Clang (for RocksDB compilation)
+- **NVIDIA CUDA Toolkit (`nvcc`)** *(Optional — required only for GPU mining; on Windows, also install MSVC C++ build tools)*
 
 ### Build Instructions
 
@@ -157,15 +158,36 @@ cd quantum-btc
 cargo build --release
 ```
 
-### Run the Node
+*(If a CUDA toolkit is detected, `build.rs` automatically compiles the CUDA kernel for GTX 10/16-series and RTX 20/30/40/50-series GPUs and prints: `warning: CUDA kernel compiled; GPU mining available.`)*
 
-After building from source, you can start the Q-BTC node directly:
+### Run the Node (CPU Default)
+
+After building from source, you can start the Q-BTC node with the default multi-core CPU backend:
 
 ```bash
-cargo run --release
+./target/release/quantum-btc
 ```
 
-*(Alternatively, you can execute the compiled binary: `./target/release/quantum-btc`)*
+### ⚡ Run with NVIDIA GPU (CUDA) Mining
+
+GPU mining is opt-in via the `QBTC_MINER_BACKEND` environment variable (`cuda` for GPU-only, or `hybrid` for CPU+GPU):
+
+**Linux / macOS:**
+```bash
+cargo build --release
+QBTC_MINER_BACKEND=cuda ./target/release/quantum-btc
+```
+
+**Windows (PowerShell):**
+```powershell
+cargo build --release
+$env:QBTC_MINER_BACKEND = "cuda"
+.\target\release\quantum-btc.exe
+```
+
+*(Or simply double-click `Start_Mining_GPU.bat` on Windows / `Start_Mining_GPU.command` on macOS & Linux).*
+
+👉 **[📖 Read the Full GPU Mining & Multi-GPU Tuning Guide (`docs/GPU_MINING.md`)](./docs/GPU_MINING.md)**
 
 ---
 

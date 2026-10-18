@@ -7,8 +7,11 @@ builds and mines on the CPU exactly as before.
 ## Requirements
 
 - An NVIDIA GPU of compute capability 6.1 or newer (GTX 10-series onward).
-- The CUDA toolkit. Prebuilt SASS is emitted for `sm_61`, `sm_75` and `sm_86`,
-  plus PTX for `compute_86`, so newer architectures still run via driver JIT.
+- The CUDA toolkit. `build.rs` automatically detects the installed `nvcc`
+  capabilities and emits native SASS for supported architectures (`sm_61`
+  Pascal, `sm_70` Volta, `sm_75` Turing, `sm_80`/`sm_86` Ampere, `sm_89` Ada
+  RTX 40-series, `sm_90` Hopper, `sm_120` Blackwell RTX 50-series) plus PTX
+  fallback for forward and backward driver JIT compatibility.
 - On Windows, the MSVC C++ build tools (`nvcc` uses `cl.exe` as its host
   compiler). You do **not** need a Developer Command Prompt: the build script
   locates the toolchain itself.
@@ -48,7 +51,10 @@ Select the backend with `QBTC_MINER_BACKEND`:
 | `hybrid`, `both`, `cpu+gpu` | CPU pool and GPU run together on the same template |
 
 ```sh
-# Linux / macOS
+# Linux / macOS (Standard)
+QBTC_MINER_BACKEND=cuda ./target/release/quantum-btc
+
+# Linux / macOS (Custom data directory & port)
 QBTC_MINER_BACKEND=cuda ./target/release/quantum-btc --datadir ./qbtc_data --port 8000
 ```
 
