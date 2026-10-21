@@ -192,11 +192,28 @@ print_detection() {
 }
 
 install_packages() {
-  say "Installing build dependencies (apt)"
+  say "Build dependencies"
+  # Only ask for administrator rights when something is really missing. Packages already
+  # installed system-wide (for example by another user of this machine) are reused.
+  local missing=() p
+  for p in "${PKGS[@]}"; do
+    dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" || missing+=("$p")
+  done
+  if [ "${#missing[@]}" -eq 0 ]; then
+    info "All required system packages are already installed; skipping apt."
+    return 0
+  fi
+  info "Missing packages: ${missing[*]}"
+  if [ -n "$SUDO" ] && ! $SUDO -v; then
+    die "This user cannot use sudo, so the missing packages cannot be installed.
+    Ask an administrator, or from an admin account run:
+        sudo apt-get install -y ${missing[*]}
+    then run this installer again as this user (it will skip this step)."
+  fi
   # shellcheck disable=SC2086
   $SUDO apt-get update
   # shellcheck disable=SC2086
-  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y "${PKGS[@]}"
+  $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y "${missing[@]}"
 }
 
 maybe_install_cuda() {
