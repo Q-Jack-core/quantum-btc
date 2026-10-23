@@ -1512,7 +1512,7 @@ def main():
             deadline = time.time() + 12
             while time.time() < deadline:
                 s = net.get()
-                done = (s["expl"]["ok"] or s["pool"]["ok"] or net.last_try.get("expl", 0) and time.time() - net.last_try["expl"] > 8)
+                done = (((not net.expl or s["expl"]["ok"]) and (not net.pool_base or s["pool"]["ok"])) or (not net.expl and not net.pool_base and s["rpc"]["ok"]))
                 if done and (not ex.address or s["bal"]["ok"] or time.time() > deadline - 6):
                     break
                 time.sleep(0.3)
