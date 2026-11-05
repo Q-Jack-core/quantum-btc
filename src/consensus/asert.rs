@@ -75,7 +75,7 @@ pub fn calculate_asert_target(
     }
 
     // 7. Clamp to absolute network boundaries (The Anchor Drift Defense)
-    let max_target = 0x0000_0000_FFFF_FFFFu64; // Easiest difficulty (Locked to Genesis target)
+    let max_target = crate::consensus::MAX_TARGET; // Easiest difficulty (Locked to Genesis target)
     let min_target = 0x0000_0000_0000_0001u64; // Hardest difficulty
     
     let final_target = cmp::min(new_target, max_target as u128) as u64;
