@@ -14,6 +14,12 @@ pub const MAX_FUTURE_TIME_SECS: u64 = 3600;
 // Dynamic runtime difficulty is strictly bounded by the ASERT engine.
 pub const MAX_TARGET: u64 = 0x0000_00FF_FFFF_FFFF;
 
+// Hard fork: first block height validated with the corrected ASERT polynomial
+// (`asert::calculate_asert_target_v2`). Below this height the legacy rule applies unchanged.
+// PROPOSED VALUE. It must be agreed with miners/node operators and released before the
+// chain reaches it, otherwise old nodes reject blocks and the network splits.
+pub const ASERT_V2_ACTIVATION_HEIGHT: u64 = 28_200;
+
 static LAST_PRINTED_HEIGHT: AtomicU64 = AtomicU64::new(0);
 
 pub struct ConsensusEngine;
@@ -41,12 +47,22 @@ impl ConsensusEngine {
             height_diff = chain_length.saturating_sub(1700);
         }
 
-        let final_target = asert::calculate_asert_target(
-            anchor_target,
-            anchor_timestamp,
-            latest_block_timestamp,
-            height_diff
-        );
+        let final_target = if chain_length >= ASERT_V2_ACTIVATION_HEIGHT {
+            asert::calculate_asert_target_v2(
+                anchor_target,
+                anchor_timestamp,
+                latest_block_timestamp,
+                height_diff,
+                MAX_TARGET,
+            )
+        } else {
+            asert::calculate_asert_target(
+                anchor_target,
+                anchor_timestamp,
+                latest_block_timestamp,
+                height_diff,
+            )
+        };
 
         // Log target only once per block height
         let last_printed = LAST_PRINTED_HEIGHT.load(Ordering::Relaxed);
@@ -240,6 +256,46 @@ pub fn verify_checkpoint(height: u64, block_hash: &[u8; 32]) -> Result<(), &'sta
 }
 
 
+
+#[cfg(test)]
+mod difficulty_tests {
+    use super::*;
+
+    const G_TIME: u64 = 1_778_976_000; // genesis timestamp
+    const G_TARGET: u64 = 1_099_511_627_775; // genesis target
+
+    /// Real mainnet history (parent timestamps recovered from node logs): the legacy
+    /// path must keep producing exactly the targets already accepted by the network.
+    #[test]
+    fn legacy_history_is_unchanged() {
+        let cases: [(u64, u64, u64); 5] = [
+            (27_993, 1_793_903_757, 0x0000_0000_0017_33ff),
+            (27_994, 1_793_904_080, 0x0000_0000_0017_0d7f),
+            (27_995, 1_793_906_275, 0x0000_0000_0017_eecf),
+            (27_996, 1_793_906_300, 0x0000_0000_0017_9c9f),
+            (27_997, 1_793_907_251, 0x0000_0000_0017_ce9f),
+        ];
+        for (height, parent_ts, expected) in cases {
+            assert!(height < ASERT_V2_ACTIVATION_HEIGHT);
+            assert_eq!(
+                ConsensusEngine::calculate_next_target(G_TIME, G_TARGET, parent_ts, height),
+                expected,
+                "height {height}"
+            );
+        }
+    }
+
+    #[test]
+    fn v2_is_used_from_activation_height() {
+        let h = ASERT_V2_ACTIVATION_HEIGHT;
+        let ts = 1_794_100_000u64;
+        let expected = asert::calculate_asert_target_v2(
+            G_TARGET, G_TIME, ts, h - 1700, MAX_TARGET,
+        );
+        assert_eq!(ConsensusEngine::calculate_next_target(G_TIME, G_TARGET, ts, h), expected);
+        assert_eq!(ConsensusEngine::calculate_next_target(G_TIME, G_TARGET, ts, h + 1) > 0, true);
+    }
+}
 
 #[cfg(test)]
 mod validation_tests {
