@@ -81,3 +81,100 @@ pub fn calculate_asert_target(
     let final_target = cmp::min(new_target, max_target as u128) as u64;
     cmp::max(final_target, min_target)
 }
+
+/// ASERT v2 (activates at `consensus::ASERT_V2_ACTIVATION_HEIGHT`, a hard fork).
+///
+/// Identical to `calculate_asert_target` except for two corrections:
+///  1. The fractional part uses the real aserti3-2d cubic approximation of 2^x.
+///     The legacy polynomial is not 2^x (its cubic term is 1/4 instead of 1/6): it reaches
+///     2.75 at frac -> 1 instead of 2.0, so at every half-life boundary the target dropped
+///     about 27% in a single block (difficulty +37%), even when no miner joined.
+///  2. The ceiling is a parameter, so consensus uses one single limit.
+/// The legacy function must stay byte-for-byte unchanged to keep validating old blocks.
+pub fn calculate_asert_target_v2(
+    anchor_target: u64,
+    anchor_time: u64,
+    current_time: u64,
+    height_diff: u64,
+    max_target: u64,
+) -> u64 {
+    let ideal_timespan = (height_diff as i128).saturating_mul(IDEAL_BLOCK_TIME_SECONDS as i128);
+    let actual_timespan = (current_time as i128).saturating_sub(anchor_time as i128);
+    let time_delta = actual_timespan.saturating_sub(ideal_timespan);
+
+    // exponent = time_delta / half_life in 16-bit fixed point (same rounding as legacy).
+    let exponent = time_delta
+        .saturating_mul(1i128 << RADIX)
+        .checked_div(ASERT_HALF_LIFE as i128)
+        .unwrap_or(0);
+
+    let shifts = exponent >> RADIX;
+    let frac = (exponent & ((1i128 << RADIX) - 1)) as u128;
+
+    // factor = 65536 * 2^(frac/65536), max relative error about 0.012%.
+    let factor: u128 = 65_536
+        + ((195_766_423_245_049u128 * frac
+            + 971_821_376u128 * frac * frac
+            + 5_127u128 * frac * frac * frac
+            + (1u128 << 47))
+            >> 48);
+
+    let mut new_target = (anchor_target as u128).saturating_mul(factor) >> RADIX;
+
+    if shifts < 0 {
+        let abs_shifts = shifts.unsigned_abs();
+        if abs_shifts >= 127 {
+            new_target = 1;
+        } else {
+            new_target >>= abs_shifts as u32;
+        }
+    } else if shifts >= 64 {
+        new_target = max_target as u128;
+    } else {
+        new_target <<= shifts as u32;
+    }
+
+    cmp::max(cmp::min(new_target, max_target as u128) as u64, 1)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const A: u64 = 1_099_511_627_775;
+
+    #[test]
+    fn v2_matches_true_power_of_two() {
+        let anchor_time: u64 = 10_000_000;
+        let mut td: i64 = -2 * ASERT_HALF_LIFE;
+        while td <= 0 {
+            // time_delta = current_time - anchor_time - 100 blocks * 600s = td
+            let current = (anchor_time as i64 + 600 * 100 + td) as u64;
+            let got = calculate_asert_target_v2(A, anchor_time, current, 100, A) as f64;
+            let want = (A as f64) * 2f64.powf(td as f64 / ASERT_HALF_LIFE as f64);
+            assert!(((got - want) / want).abs() < 3e-4, "td={} got={} want={}", td, got, want);
+            td += 997;
+        }
+    }
+
+    #[test]
+    fn v2_is_monotonic_and_has_no_step_at_half_life_boundary() {
+        let mut prev = 0u64;
+        for s in (0..200_000u64).step_by(30) {
+            let t = calculate_asert_target_v2(1 << 30, 0, 600 * 10 + s, 10, A);
+            assert!(t >= prev, "target decreased at +{}s", s);
+            prev = t;
+        }
+    }
+
+    #[test]
+    fn legacy_has_the_boundary_step_v2_removes() {
+        // 12h late crosses one half-life: legacy target must NOT be below the value just before.
+        let before = calculate_asert_target(1 << 30, 0, 600 * 10 + 43_199, 10);
+        let after = calculate_asert_target(1 << 30, 0, 600 * 10 + 43_200, 10);
+        assert!(after < before, "legacy drop at the boundary is the known bug");
+        let b2 = calculate_asert_target_v2(1 << 30, 0, 600 * 10 + 43_199, 10, A);
+        let a2 = calculate_asert_target_v2(1 << 30, 0, 600 * 10 + 43_200, 10, A);
+        assert!(a2 >= b2);
+    }
+}
