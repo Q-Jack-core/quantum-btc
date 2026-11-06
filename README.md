@@ -68,6 +68,12 @@ chmod +x quantum-btc
 
 *(After the node starts, type `wallet_gen your_name` and `auto_mine start your_name` as usual).*
 
+**For Linux (1-Line Automated Source Installer + Live Monitor for Debian/Ubuntu/RunPod):**
+```bash
+curl -fsSL https://raw.githubusercontent.com/Q-Jack-core/quantum-btc/main/scripts/install.sh | bash
+```
+*(Builds from source with CUDA auto-detection, installs the `qbtc` tmux launcher, and sets up the `qbtc monitor` live chain-verification dashboard).*
+
 ### 3. Generate Wallet & Start Mining
 **Important: After launching the node for the first time, please wait a few minutes for the network synchronization to complete.** The node needs to download and verify the blockchain history before you can interact with it.
 
@@ -188,6 +194,10 @@ $env:QBTC_MINER_BACKEND = "cuda"
 *(Or simply double-click `Start_Mining_GPU.bat` on Windows / `Start_Mining_GPU.command` on macOS & Linux).*
 
 👉 **[📖 Read the Full GPU Mining & Multi-GPU Tuning Guide (`docs/GPU_MINING.md`)](./docs/GPU_MINING.md)**
+
+👉 **[🐧 Read the Linux Setup, tmux & Live Monitor Guide (`docs/LINUX.md`)](./docs/LINUX.md)**
+
+👉 **[⌨️ Read the Node CLI Commands & Seed Safety Reference (`docs/COMMANDS.md`)](./docs/COMMANDS.md)**
 
 ---
 
