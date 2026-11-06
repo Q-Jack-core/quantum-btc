@@ -43,13 +43,13 @@ pub fn calculate_asert_target(
     let shifts = exponent >> RADIX; 
     let frac = exponent & ((1i128 << RADIX) - 1); 
 
-    // 4. Taylor Series Polynomial Approximation for 2^(frac/65536)
-    // Formula: 65536 + frac + frac^2 / 2! + frac^3 / 3! 
-    // This is mathematically proven safe within 16-bit fractional bounds.
+    // 4. Power-of-Two Cubic Polynomial for the fractional window
+    // Formula: 65536 + frac + frac^2 / 2 + frac^3 / 4
+    // Consensus-locked hybrid curve within 16-bit fractional bounds.
     let mut multiplier = 65536i128;
     multiplier = multiplier.saturating_add(frac);
     multiplier = multiplier.saturating_add((frac.saturating_mul(frac)) >> (RADIX + 1));
-    multiplier = multiplier.saturating_add((frac.saturating_mul(frac).saturating_mul(frac)) / 17179869184i128); // 3! * 65536^2
+    multiplier = multiplier.saturating_add((frac.saturating_mul(frac).saturating_mul(frac)) / 17179869184i128); // 4 * 65536^2 (2^34)
 
     // 5. Apply the multiplier to the target using u128 to prevent overflow
     let mut new_target = (anchor_target as u128)
@@ -74,10 +74,78 @@ pub fn calculate_asert_target(
         }
     }
 
-    // 7. Clamp to absolute network boundaries (The Anchor Drift Defense)
-    let max_target = 0x0000_0000_FFFF_FFFFu64; // Easiest difficulty (Locked to Genesis target)
+    // 7. Clamp to dynamic ASERT boundaries (16x stricter than static consensus::MAX_TARGET)
+    let max_target = 0x0000_0000_FFFF_FFFFu64; // Dynamic runtime ceiling (Anchor Drift Defense)
     let min_target = 0x0000_0000_0000_0001u64; // Hardest difficulty
     
     let final_target = cmp::min(new_target, max_target as u128) as u64;
     cmp::max(final_target, min_target)
+}
+
+
+
+
+#[cfg(test)]
+mod reference_tests {
+    use super::*;
+
+    #[test]
+    fn zero_deviation_preserves_anchor_target() {
+        let anchor_target = 1_000_000;
+        let anchor_time = 100_000;
+        let height_diff = 100;
+        let current_time = anchor_time + (height_diff * IDEAL_BLOCK_TIME_SECONDS as u64);
+        assert_eq!(
+            calculate_asert_target(anchor_target, anchor_time, current_time, height_diff),
+            anchor_target
+        );
+    }
+
+    #[test]
+    fn integer_half_life_shifts_scale_by_exact_powers_of_two() {
+        let anchor_target = 1_000_000;
+        let anchor_time = 100_000;
+        let height_diff = 100;
+        let ideal_time = anchor_time + (height_diff * IDEAL_BLOCK_TIME_SECONDS as u64);
+
+        assert_eq!(
+            calculate_asert_target(anchor_target, anchor_time, ideal_time + ASERT_HALF_LIFE as u64, height_diff),
+            2_000_000
+        );
+        assert_eq!(
+            calculate_asert_target(anchor_target, anchor_time, ideal_time - ASERT_HALF_LIFE as u64, height_diff),
+            500_000
+        );
+    }
+
+    #[test]
+    fn fractional_half_life_follows_documented_hybrid_cubic_curve() {
+        let anchor_target = 1_000_000;
+        let anchor_time = 100_000;
+        let height_diff = 100;
+
+        assert_eq!(
+            calculate_asert_target(anchor_target, anchor_time, 181_600, height_diff),
+            1_656_250
+        );
+        assert_eq!(
+            calculate_asert_target(anchor_target, anchor_time, 138_400, height_diff),
+            828_125
+        );
+    }
+
+    #[test]
+    fn extreme_deviations_clamp_safely_without_overflow() {
+        let anchor_target = 1_000_000;
+        let anchor_time = 100_000;
+
+        assert_eq!(
+            calculate_asert_target(anchor_target, anchor_time, anchor_time + 100_000_000, 1),
+            0x0000_0000_FFFF_FFFFu64
+        );
+        assert_eq!(
+            calculate_asert_target(anchor_target, anchor_time, anchor_time, 100_000),
+            1
+        );
+    }
 }

@@ -167,7 +167,7 @@ impl UtxoState {
         
         for record in projected_utxos.values() {
             if record.output.public_key_hash == *pubkey_hash {
-                if record.is_coinbase && current_height < record.height + COINBASE_MATURITY {
+                if record.is_coinbase && current_height < record.height.saturating_add(COINBASE_MATURITY) {
                     locked += record.output.value;
                 } else {
                     mature += record.output.value;
@@ -207,7 +207,7 @@ impl UtxoState {
                 if record.output.public_key_hash != *pubkey_hash {
                     return false;
                 }
-                if record.is_coinbase && current_height < record.height + COINBASE_MATURITY {
+                if record.is_coinbase && current_height < record.height.saturating_add(COINBASE_MATURITY) {
                     return false;
                 }
                 true
@@ -266,6 +266,11 @@ impl UtxoState {
         let mut input_sum: u64 = 0;
         // Use the SegWit-safe TXID (Excludes Witnesses) for the message hash.
         let tx_core_hash = tx.calculate_id();
+        let tx_witness_hash = if self.verified_tx_cache.is_empty() {
+            [0u8; 32]
+        } else {
+            tx.calculate_witness_hash()
+        };
         
         //  Intra-transaction double-spend tracker for Mempool.
         let mut tx_spent_tracker = std::collections::HashSet::new();
@@ -281,7 +286,7 @@ impl UtxoState {
                 .ok_or("Attempted to spend non-existent UTXO.")?;
 
             if record.is_coinbase {
-                let maturity_height = record.height + COINBASE_MATURITY;
+                let maturity_height = record.height.saturating_add(COINBASE_MATURITY);
                 if current_height < maturity_height {
                     return Err("Consensus Violation: Attempted to spend immature coinbase UTXO.");
                 }
@@ -295,7 +300,7 @@ impl UtxoState {
                 if is_historical { true } else { return Err("Consensus Violation: Missing witness."); }
             } else if !owner_ok {
                 false
-            } else if self.verified_tx_cache.contains(&tx_core_hash) {
+            } else if self.verified_tx_cache.contains(&tx_witness_hash) {
                 true
             } else {
                 tx.verify_witness(i, &tx_core_hash)
@@ -305,7 +310,9 @@ impl UtxoState {
                 // Check if delayed recovery logic is triggered.
                 if let Some(recovery) = &record.output.recovery {
                     // Logic: Only activate if (Creation Height + Delay + 30-day Window) < Current.
-                    let activation_height = record.height + recovery.recovery_delay + RECOVERY_CHALLENGE_WINDOW;
+                    let activation_height = record.height
+                        .saturating_add(recovery.recovery_delay)
+                        .saturating_add(RECOVERY_CHALLENGE_WINDOW);
                     
                     if current_height < activation_height {
                         return Err("Recovery claim is still within the challenge window.");
@@ -387,6 +394,9 @@ impl UtxoState {
         //  Intra-block double-spend tracker.
         let mut in_block_spent_tracker: std::collections::HashSet<OutPoint> = std::collections::HashSet::new();
 
+        let cache_active = !self.verified_tx_cache.is_empty();
+        let mut consumed_wtxids = Vec::new();
+
         for (index, tx) in block.transactions.iter().enumerate() {
             let is_null_input = tx.inputs.len() == 1 && tx.inputs[0].previous_output_hash == [0u8; 32];
             let is_coinbase = index == 0;
@@ -400,6 +410,14 @@ impl UtxoState {
                 if tx.inputs.is_empty() && !tx.outputs.is_empty() && tx.outputs[0].value == 0 {
                     return Err("Layer-2 verification requires upgraded node implementation.");
                 }
+
+                let tx_witness_hash = if cache_active {
+                    let wtxid = tx.calculate_witness_hash();
+                    consumed_wtxids.push(wtxid);
+                    wtxid
+                } else {
+                    [0u8; 32]
+                };
 
                 let mut input_sum: u64 = 0;
                 for (i, input) in tx.inputs.iter().enumerate() {
@@ -419,12 +437,12 @@ impl UtxoState {
                         return Err("Attempted to spend non-existent UTXO.");
                     };
 
-                    if record.is_coinbase && height < record.height + COINBASE_MATURITY {
+                    if record.is_coinbase && height < record.height.saturating_add(COINBASE_MATURITY) {
                         return Err("Consensus Violation: Attempted to spend immature coinbase UTXO.");
                     }
                     
                     // Queue for Phase 2 parallel computation
-                    signature_tasks.push((tx, i, tx_core_hash, record.clone()));
+                    signature_tasks.push((tx, i, tx_core_hash, tx_witness_hash, record.clone()));
                     input_sum = checked_money_add(input_sum, record.output.value)?;
                 }
 
@@ -455,19 +473,21 @@ impl UtxoState {
         // Phase 2 - Absolute Concurrency (Rayon Par-Iter)
         // Executes heavy ML-DSA-65 matrices on all CPU cores simultaneously.
         use rayon::prelude::*;
-        let all_signatures_valid = signature_tasks.par_iter().all(|(tx, i, tx_core_hash, record)| {
+        let all_signatures_valid = signature_tasks.par_iter().all(|(tx, i, tx_core_hash, tx_witness_hash, record)| {
             let owner_ok = tx.witnesses.get(*i)
                 .map(|w| Self::witness_key_matches_owner(w, &record.output))
                 .unwrap_or(false);
             if tx.witnesses.is_empty() {
                 is_historical
-            } else if owner_ok && self.verified_tx_cache.contains(tx_core_hash) {
+            } else if owner_ok && cache_active && self.verified_tx_cache.contains(tx_witness_hash) {
                 true
             } else {
                 let is_primary = owner_ok && tx.verify_witness(*i, tx_core_hash);
                 if !is_primary {
                     if let Some(recovery) = &record.output.recovery {
-                        let activation_height = record.height + recovery.recovery_delay + RECOVERY_CHALLENGE_WINDOW;
+                        let activation_height = record.height
+                            .saturating_add(recovery.recovery_delay)
+                            .saturating_add(RECOVERY_CHALLENGE_WINDOW);
                         if height < activation_height { return false; }
                         return self.verify_recovery_reveal(tx, *i, &recovery.recovery_hash);
                     }
@@ -504,8 +524,10 @@ impl UtxoState {
                 });
                 undo_log.newly_created_outpoints.push(new_op);
             }
-            
-            self.verified_tx_cache.remove(&tx_hash);
+        }
+
+        for wtxid in consumed_wtxids {
+            self.verified_tx_cache.remove(&wtxid);
         }
 
         Ok(undo_log)
@@ -585,7 +607,7 @@ impl UtxoActor {
             while let Some(cmd) = self.receiver.blocking_recv() {
                 match cmd {
                     UtxoCommand::ValidateMempoolTx { tx, current_height, crypto_pre_verified, resp } => {
-                        let tx_hash = tx.calculate_id();
+                        let tx_hash = tx.calculate_witness_hash();
                         let mut temporary_cache = false;
                         
                         //  Inject into cache if pre-verified to bypass ML-DSA-65 in state validation
@@ -597,7 +619,7 @@ impl UtxoActor {
                         let validation_result = self.state.validate_transaction(&tx, current_height, false);
                         
                         if validation_result.is_ok() {
-                            //  Q-SigCache stores validated TXID to bypass future block-level ML-DSA-65 checks.
+                            //  Q-SigCache stores validated WTXID to bypass future block-level ML-DSA-65 checks.
                             if self.state.verified_tx_cache.len() > 100_000 {
                                 self.state.verified_tx_cache.clear(); // OOM Protection
                             }
@@ -731,8 +753,95 @@ mod validation_tests {
             witnesses: vec![TxWitness { signature: vec![], public_key: pk }],
         };
         // Pre-mark as verified so the check under test is the only thing that can fail.
-        s.verified_tx_cache.insert(tx.calculate_id());
+        s.verified_tx_cache.insert(tx.calculate_witness_hash());
         let err = s.validate_transaction(&tx, 1_000, true).unwrap_err();
         assert!(err.contains("out of range"), "got: {err}");
     }
+
+    #[test]
+    fn mutated_signature_misses_verified_tx_cache_and_fails_block_validation() {
+        use sha2::{Digest, Sha256};
+        let (pk, sk) = crate::crypto::ml_dsa::generate_deterministic_keypair(&[42u8; 32]);
+        let owner_hash: [u8; 32] = Sha256::digest(&pk).into();
+        let op = OutPoint { tx_hash: [9u8; 32], vout: 0 };
+
+        let mut base_state = UtxoState::new();
+        base_state.unspent_outputs.insert(op.clone(), UtxoRecord {
+            output: TxOut { value: 10_000, public_key_hash: owner_hash, recovery: None },
+            height: 1,
+            is_coinbase: false,
+        });
+
+        let mut valid_tx = Transaction {
+            inputs: vec![TxIn { previous_output_hash: op.tx_hash, vout: op.vout }],
+            outputs: vec![TxOut { value: 9_000, public_key_hash: [2u8; 32], recovery: None }],
+            witnesses: vec![],
+        };
+        let core_hash = valid_tx.calculate_id();
+        let sig = crate::crypto::ml_dsa::sign_message(&core_hash, &sk);
+        valid_tx.witnesses = vec![TxWitness { signature: sig, public_key: pk.clone() }];
+
+        // 1. Validate legitimate tx and cache its WTXID.
+        assert_eq!(base_state.validate_transaction(&valid_tx, 200, false), Ok(1_000));
+        let mut cached_state = base_state.clone();
+        cached_state.verified_tx_cache.insert(valid_tx.calculate_witness_hash());
+        let mut uncached_state = base_state.clone();
+
+        // 2. Clone tx and corrupt only the signature bytes (TXID unchanged, WTXID changed).
+        let mut tampered_tx = valid_tx.clone();
+        tampered_tx.witnesses[0].signature[0] ^= 0xFF;
+        assert_eq!(valid_tx.calculate_id(), tampered_tx.calculate_id());
+        assert_ne!(valid_tx.calculate_witness_hash(), tampered_tx.calculate_witness_hash());
+        assert!(!tampered_tx.verify_witness(0, &core_hash));
+
+        let coinbase = Transaction {
+            inputs: vec![TxIn { previous_output_hash: [0u8; 32], vout: 0 }],
+            outputs: vec![TxOut { value: 50_0000_0000, public_key_hash: [0u8; 32], recovery: None }],
+            witnesses: vec![],
+        };
+        let bad_block = Block::new([0u8; 32], vec![coinbase.clone(), tampered_tx], 1, 0);
+
+        // 3. Both cached and uncached paths must reject the block with the mutated signature.
+        assert!(cached_state.process_block(&bad_block, 200, false).is_err());
+        assert!(uncached_state.process_block(&bad_block, 200, false).is_err());
+
+        // 4. Legitimate block still hits the WTXID cache, succeeds, and evicts the cache entry.
+        let good_block = Block::new([0u8; 32], vec![coinbase, valid_tx.clone()], 1, 0);
+        assert!(cached_state.process_block(&good_block, 200, false).is_ok());
+        assert!(!cached_state.verified_tx_cache.contains(&valid_tx.calculate_witness_hash()));
+    }
+
+    #[test]
+    fn recovery_delay_u64_max_does_not_overflow_or_bypass_window() {
+        use sha2::{Digest, Sha256};
+        let pk = vec![3u8; 16];
+        let owner_hash: [u8; 32] = Sha256::digest(&pk).into();
+        let op = OutPoint { tx_hash: [8u8; 32], vout: 0 };
+
+        let mut state = UtxoState::new();
+        state.unspent_outputs.insert(op.clone(), UtxoRecord {
+            output: TxOut {
+                value: 5_000,
+                public_key_hash: owner_hash,
+                recovery: Some(crate::transaction::RecoveryInfo {
+                    recovery_hash: [0xAA; 32],
+                    // Exact wrap-around value that would overflow to 0 under unchecked '+'
+                    recovery_delay: u64::MAX - 100 - RECOVERY_CHALLENGE_WINDOW + 1,
+                }),
+            },
+            height: 100,
+            is_coinbase: false,
+        });
+
+        let tx = Transaction {
+            inputs: vec![TxIn { previous_output_hash: op.tx_hash, vout: 0 }],
+            outputs: vec![TxOut { value: 4_000, public_key_hash: [1u8; 32], recovery: None }],
+            witnesses: vec![TxWitness { signature: vec![0u8; 16], public_key: vec![9u8; 16] }],
+        };
+
+        let err = state.validate_transaction(&tx, 28_000, false).unwrap_err();
+        assert!(err.contains("challenge window"), "got: {err}");
+    }
 }
+
+
