@@ -213,6 +213,10 @@ lazy_static! {
 
         // Immutable trust anchor following PR #8 validation hardening.
         m.insert(22800, parse_hex("00000000008d248f87a702956598d8211500fffb7da871053b40dbf8c78856ca"));
+        
+        // Witness commitment activation anchor & 30K Milestone checkpoint.
+        m.insert(25000, parse_hex("000000000020eaed04bccbac8f187ce8658636192992c0a3ba4ccc05e5dce2a6"));
+        m.insert(30000, parse_hex("0000000000013919c44c62cfde9731b8bed325eb5cceb9e5c663a10797e4a7ba"));
 
         m
     };

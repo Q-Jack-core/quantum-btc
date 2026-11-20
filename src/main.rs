@@ -867,7 +867,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         }
 
                         if array_index > 0 && array_index % 1000 == 0 {
-                            let cutoff = array_index.saturating_sub(1000);
+                            let cutoff = array_index
+                                .saturating_sub(1000)
+                                .min(quantum_btc::config::WITNESS_COMMITMENT_ACTIVATION_HEIGHT);
                             let _ = storage_worker.prune_historical_witnesses(cutoff);
                         }
 
@@ -2269,8 +2271,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 println!("[INFO] Sync: Sending GetHeaders request with {} locator hashes.", locator_hashes.len());
                 let req = crate::network::SyncRequest::GetHeaders { locator_hashes, requester: local_peer_id.to_string() };
 
-                // L1 V2.0 CORE FIX: Prioritize specific peer, fallback to any connected peer if not provided.
-                let target_peer = specific_peer_opt.or_else(|| swarm.connected_peers().next().cloned());
+                // L1 V2.0 CORE FIX: Prioritize specific peer if still connected, fallback to any connected peer.
+                let target_peer = specific_peer_opt
+                    .filter(|p| swarm.is_connected(p))
+                    .or_else(|| swarm.connected_peers().next().cloned());
                 if let Some(peer) = target_peer {
                     let _ = swarm.behaviour_mut().req_resp.send_request(&peer, req);
                 } else {
@@ -2284,6 +2288,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 match cmd {
                     SwarmCommand::BanAndDisconnect(bad_peer) => {
                         tracing::warn!("[WARN] Executioner: Severing physical connection with banned peer {}", bad_peer);
+                        swarm.behaviour_mut().gossipsub.remove_explicit_peer(&bad_peer);
                         let _ = swarm.disconnect_peer_id(bad_peer);
                     }
                     SwarmCommand::Dial(addr) => {
@@ -2398,7 +2403,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                         for (_, addr) in list.into_iter().take(5) { let _ = swarm.dial(addr); }
                     }
                     libp2p::swarm::SwarmEvent::Behaviour(network::p2p::QbtcBehaviourEvent::Identify(libp2p::identify::Event::Received { peer_id, .. })) => {
-                        swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                        if swarm.is_connected(&peer_id) && safe_lock!(reputation).is_trusted(&peer_id) {
+                            swarm.behaviour_mut().gossipsub.add_explicit_peer(&peer_id);
+                        }
                     }
                     // Silently absorb successful ping events. Failures are handled by OutboundFailure/ConnectionClosed.
                     libp2p::swarm::SwarmEvent::Behaviour(network::p2p::QbtcBehaviourEvent::Ping(_)) => {}
@@ -3340,6 +3347,25 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                     let lca_height = storage_clone.get_block_index(&lca_hash).map_or(0, |idx| idx.height);
                                                     let current_height = local_chain.len().saturating_sub(1) as u64;
 
+                                                    let highest_locked_cp = crate::consensus::CHECKPOINTS
+                                                        .keys()
+                                                        .copied()
+                                                        .filter(|&cp_h| cp_h <= current_height)
+                                                        .max()
+                                                        .unwrap_or(0);
+                                                    if lca_height < highest_locked_cp {
+                                                        tracing::warn!(
+                                                            "[WARN] Security: Rejected deep reorg below locked checkpoint {} (LCA: {}).",
+                                                            highest_locked_cp,
+                                                            lca_height
+                                                        );
+                                                        if let Ok(bad_peer) = responder_str.parse::<libp2p::PeerId>() {
+                                                            let _ = safe_lock!(reputation_clone).report_offense(&bad_peer, NetworkOffense::InvalidHeader);
+                                                            let _ = swarm_cmd_tx_clone.try_send(SwarmCommand::BanAndDisconnect(bad_peer));
+                                                        }
+                                                        return None;
+                                                    }
+
                                                     //  FIX: Pre-flight Check (Headers-Trap Defense)
                                                     // Trace path and verify physical data presence BEFORE executing destructive rollbacks.
                                                     let mut connect_path = Vec::new();
@@ -3436,7 +3462,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                                                             let _ = utxo_tx_worker_clone.blocking_send(utxo::UtxoCommand::ApplyBlock {
                                                                 block: b_apply.clone(),
                                                                 height: apply_h,
-                                                                is_historical: false,
+                                                                is_historical: apply_h < quantum_btc::config::WITNESS_COMMITMENT_ACTIVATION_HEIGHT,
                                                                 resp: resp_tx
                                                             });
 
@@ -3660,7 +3686,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             }
                             // Precise timeout failure rollback to prevent Cache Flush Exploits.
                             libp2p::request_response::Event::OutboundFailure { peer, request_id, error, .. } => {
-                                tracing::warn!("[WARN] Network: ReqResp outbound failure to {}: {:?}. Releasing tracker lock.", peer, error);
+                                match &error {
+                                    libp2p::request_response::OutboundFailure::ConnectionClosed
+                                    | libp2p::request_response::OutboundFailure::DialFailure => {
+                                        tracing::debug!("[DEBUG] Network: ReqResp outbound closed to {}: {:?}. Releasing tracker lock.", peer, error);
+                                    }
+                                    _ => {
+                                        tracing::warn!("[WARN] Network: ReqResp outbound failure to {}: {:?}. Releasing tracker lock.", peer, error);
+                                    }
+                                }
                                 if let Some(failed_hash) = active_req_map.remove(&request_id) {
                                     in_flight_txs.remove(&failed_hash);
                                 }
@@ -3698,7 +3732,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                             tracing::warn!("[WARN] P2P: Outgoing connection error to {:?}: {:?}", peer_id, error);
                         }
                     }
-                    libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, cause, .. } => {
+                    libp2p::swarm::SwarmEvent::ConnectionClosed { peer_id, num_established, cause, .. } => {
+                        if num_established == 0 {
+                            swarm.behaviour_mut().gossipsub.remove_explicit_peer(&peer_id);
+                        }
                         if let Some(err) = cause {
                             let err_str = err.to_string();
                             if !err_str.contains("os error 32") && !err_str.contains("Broken pipe") {
